@@ -565,6 +565,51 @@ body {
   gap: 4px;
 }
 
+.ak-round-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ak-round-badge {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(8, 11, 22, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #e2e8f0;
+  font-size: 0.65rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.ak-round-pips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ak-round-pip {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ak-round-pip.won {
+  background: #38bdf8;
+  border-color: #bae6fd;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.85);
+  transform: scale(1.1);
+}
+
+.ak-round-pip.p2.won {
+  background: #ff3b5c;
+  border-color: #fecdd3;
+  box-shadow: 0 0 8px rgba(255, 59, 92, 0.85);
+}
+
 .ak-timer-box {
   min-width: 54px;
   height: 44px;

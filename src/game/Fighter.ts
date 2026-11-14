@@ -264,6 +264,42 @@ export class Fighter {
     this.callbacks = cb;
   }
 
+  public resetForNewRound(spawnX: number, spawnY: number, facing: 1 | -1): void {
+    this.x = spawnX;
+    this.y = spawnY;
+    this.vx = 0;
+    this.vy = 0;
+    this.facing = facing;
+    this.attackDirX = facing;
+    this.attackDirY = 0;
+    this.grounded = true;
+    this.currentPlatformId = null;
+    this.dropThroughTimer = 0;
+
+    this.hp = this.maxHp;
+    this.ki = 45;
+    this.evoEnergy = 0;
+
+    this.state = 'idle';
+    this.stateTime = 0;
+    this.hitstunRemaining = 0;
+    this.invulnTime = 0.6;
+    this.blockImpactTimer = 0;
+    this.attackHitDone = false;
+    this.hitTargetsInCurrentAttack.clear();
+    this.projectileSpawned = false;
+    this.vfxSpawned = false;
+    this.landingTimer = 0;
+    this.comboHitsReceived = 0;
+    this.comboResetTimer = 0;
+    this.auraFlashTime = 0;
+    this.evolvingPending = false;
+    this.cooldowns.ataque_1 = 0;
+    this.cooldowns.ataque_2 = 0;
+    this.cooldowns.ataque_3 = 0;
+    this.cooldowns.ataque_4 = 0;
+  }
+
   public getPhaseDamageMultiplier(): number {
     return 1 + (this.phase - 1) * 0.16;
   }

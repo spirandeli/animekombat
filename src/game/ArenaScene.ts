@@ -54,6 +54,9 @@ export interface MatchEndReport {
   p2HpRemaining: number;
   p1FinalPhase: number;
   p2FinalPhase: number;
+  team1RoundWins?: number;
+  team2RoundWins?: number;
+  roundsPlayed?: number;
   xpEarned: number;
   localSlot: FighterSlotId;
   roomMode?: '1v1' | 'rumble';
@@ -117,6 +120,10 @@ export class ArenaScene {
 
   private fighters: Fighter[] = [];
   private fightersBySlot = new Map<FighterSlotId, Fighter>();
+  private fighterSpawns = new Map<
+    FighterSlotId,
+    { x: number; y: number; facing: 1 | -1 }
+  >();
   private botSlots = new Set<FighterSlotId>();
   private aiControllers = new Map<FighterSlotId, AIController>();
   private remoteInputs = new Map<FighterSlotId, FighterInputState>();
@@ -131,6 +138,13 @@ export class ArenaScene {
   private matchEnded = false;
   private koSlowMoTimer = 0;
   private roundTimer = 99;
+  private currentRound = 1;
+  private readonly maxRounds = 3;
+  private readonly winsRequired = 2;
+  private team1RoundWins = 0;
+  private team2RoundWins = 0;
+  private pendingMatchOver = false;
+  private roundIntroTimer = 0;
   private pendingWinner: 'p1' | 'p2' | 'draw' | null = null;
   private pendingWinnerTeam: 1 | 2 | 'draw' | null = null;
 
@@ -171,6 +185,9 @@ export class ArenaScene {
     p2EvoFill?: HTMLElement;
     p2EvoReady?: HTMLElement;
     timer?: HTMLElement;
+    roundLabel?: HTMLElement;
+    t1Pips?: HTMLElement[];
+    t2Pips?: HTMLElement[];
     p1Combo?: HTMLElement;
     p2Combo?: HTMLElement;
     fps?: HTMLElement;
@@ -248,6 +265,7 @@ export class ArenaScene {
 
     this.fighters = [];
     this.fightersBySlot.clear();
+    this.fighterSpawns.clear();
     this.botSlots.clear();
     this.aiControllers.clear();
     this.remoteInputs.clear();
@@ -337,6 +355,7 @@ export class ArenaScene {
       const idx = team === 1 ? t1Idx++ : t2Idx++;
       const spawn = pool[idx % pool.length];
       const facing: 1 | -1 = team === 1 ? 1 : -1;
+      this.fighterSpawns.set(p.slot, { x: spawn.x, y: spawn.y, facing });
 
       const fighter = new Fighter(
         p.slot,
@@ -407,7 +426,12 @@ export class ArenaScene {
     this.matchEnded = false;
     this.pendingWinner = null;
     this.pendingWinnerTeam = null;
+    this.pendingMatchOver = false;
+    this.currentRound = 1;
+    this.team1RoundWins = 0;
+    this.team2RoundWins = 0;
     this.koSlowMoTimer = 0;
+    this.roundIntroTimer = 0.9;
     this.roundTimer = this.roomMode === 'rumble' ? 150 : 99;
 
     const local = this.getLocalFighter();
@@ -429,6 +453,13 @@ export class ArenaScene {
     this.hudEl.setAttribute('aria-hidden', 'false');
     this.virtualControls.setVisible(true);
     this.audio.startBgm();
+    this.combat.spawnFloatingText(
+      this.camX,
+      this.camY - 60,
+      'ROUND 1!',
+      '#facc15',
+      1.75
+    );
   }
 
   public stopMatch(): void {
@@ -437,6 +468,7 @@ export class ArenaScene {
     this.p2 = null;
     this.fighters = [];
     this.fightersBySlot.clear();
+    this.fighterSpawns.clear();
     this.botSlots.clear();
     this.aiControllers.clear();
     this.remoteInputs.clear();
@@ -478,6 +510,15 @@ export class ArenaScene {
     if (!this.isHostAuthority() && payload.slot === this.hostSlot) {
       if (typeof payload.roundTimer === 'number') {
         this.roundTimer = payload.roundTimer;
+      }
+      if (typeof payload.currentRound === 'number') {
+        this.currentRound = payload.currentRound;
+      }
+      if (typeof payload.team1RoundWins === 'number') {
+        this.team1RoundWins = payload.team1RoundWins;
+      }
+      if (typeof payload.team2RoundWins === 'number') {
+        this.team2RoundWins = payload.team2RoundWins;
       }
       if (payload.hpMap) {
         for (const [sid, hpVal] of Object.entries(payload.hpMap)) {
@@ -543,13 +584,22 @@ export class ArenaScene {
         if (this.p1 && typeof ev.p1HpRemaining === 'number') this.p1.hp = ev.p1HpRemaining;
         if (this.p2 && typeof ev.p2HpRemaining === 'number') this.p2.hp = ev.p2HpRemaining;
       }
+      if (typeof ev.currentRound === 'number') {
+        this.currentRound = ev.currentRound;
+      }
+      if (typeof ev.team1RoundWins === 'number') {
+        this.team1RoundWins = ev.team1RoundWins;
+      }
+      if (typeof ev.team2RoundWins === 'number') {
+        this.team2RoundWins = ev.team2RoundWins;
+      }
       const winnerTeam =
         ev.winnerTeam ??
         (ev.winner === 'p1' ? 1 : ev.winner === 'p2' ? 2 : 'draw');
       const winner =
         ev.winner ??
         (winnerTeam === 1 ? 'p1' : winnerTeam === 2 ? 'p2' : 'draw');
-      this.triggerKoSequence(winner, winnerTeam);
+      this.triggerKoSequence(winner, winnerTeam, ev.matchOver ?? true);
     }
   }
 
@@ -566,7 +616,7 @@ export class ArenaScene {
     );
     const localTeam = this.getLocalFighter()?.team ?? 1;
     const winner = localTeam === 1 ? 'p1' : 'p2';
-    this.triggerKoSequence(winner, localTeam);
+    this.triggerKoSequence(winner, localTeam, true);
   }
 
   public handlePlayerLeft(slot: FighterSlotId, username?: string): void {
@@ -603,18 +653,26 @@ export class ArenaScene {
 
   private triggerKoSequence(
     winner: 'p1' | 'p2' | 'draw',
-    winnerTeam: 1 | 2 | 'draw'
+    winnerTeam: 1 | 2 | 'draw',
+    isMatchOver: boolean
   ): void {
     this.pendingWinner = winner;
     this.pendingWinnerTeam = winnerTeam;
-    this.koSlowMoTimer = 1.25;
+    this.pendingMatchOver = isMatchOver;
+    this.koSlowMoTimer = isMatchOver ? 1.35 : 1.45;
     this.combat.triggerScreenShake(16, 0.45);
+    const label =
+      this.roundTimer <= 0
+        ? 'TEMPO!'
+        : winnerTeam === 'draw'
+          ? 'EMPATE!'
+          : `ROUND ${this.currentRound} K.O.!`;
     this.combat.spawnFloatingText(
       this.camX,
       this.camY - 40,
-      this.roundTimer <= 0 ? 'TEMPO!' : 'K.O.!',
+      label,
       '#facc15',
-      2.0
+      1.85
     );
     this.audio.playSfx('ko');
     this.virtualControls.vibrate([60, 40, 100]);
@@ -654,6 +712,9 @@ export class ArenaScene {
       peerHp: includeHostAuth ? peer?.hp : undefined,
       hpMap: includeHostAuth ? this.buildHpMap() : undefined,
       roundTimer: includeHostAuth ? this.roundTimer : undefined,
+      currentRound: includeHostAuth ? this.currentRound : undefined,
+      team1RoundWins: includeHostAuth ? this.team1RoundWins : undefined,
+      team2RoundWins: includeHostAuth ? this.team2RoundWins : undefined,
       ki: fighter.ki,
       evoEnergy: fighter.evoEnergy,
       phase: fighter.phase,
@@ -679,24 +740,46 @@ export class ArenaScene {
         this.arenaMap.arenaRight
       );
       if (this.koSlowMoTimer <= 0 && !this.matchEnded) {
+        if (!this.pendingMatchOver) {
+          this.startNextRound();
+          return;
+        }
         this.matchEnded = true;
         this.active = false;
         this.virtualControls.setVisible(false);
         this.audio.stopBgm();
 
-        const winnerTeam =
-          this.pendingWinnerTeam ??
-          (this.pendingWinner === 'p1' ? 1 : this.pendingWinner === 'p2' ? 2 : 'draw');
+        let winnerTeam: 1 | 2 | 'draw';
+        if (this.opponentLeftFlag) {
+          winnerTeam = localFighter.team;
+        } else if (this.team1RoundWins > this.team2RoundWins) {
+          winnerTeam = 1;
+        } else if (this.team2RoundWins > this.team1RoundWins) {
+          winnerTeam = 2;
+        } else {
+          winnerTeam =
+            this.pendingWinnerTeam ??
+            (this.pendingWinner === 'p1'
+              ? 1
+              : this.pendingWinner === 'p2'
+                ? 2
+                : 'draw');
+        }
+        const winner: 'p1' | 'p2' | 'draw' =
+          winnerTeam === 1 ? 'p1' : winnerTeam === 2 ? 'p2' : 'draw';
         const localWon = winnerTeam === localFighter.team;
 
         this.onMatchEnded?.({
-          winner: this.pendingWinner,
+          winner,
           winnerTeam,
           localWon,
           p1HpRemaining: this.p1?.hp ?? 0,
           p2HpRemaining: this.p2?.hp ?? 0,
           p1FinalPhase: this.p1?.phase ?? 1,
           p2FinalPhase: this.p2?.phase ?? 1,
+          team1RoundWins: this.team1RoundWins,
+          team2RoundWins: this.team2RoundWins,
+          roundsPlayed: this.currentRound,
           localSlot: this.localSlot,
           roomMode: this.roomMode,
           mode: this.matchMode,
@@ -709,16 +792,31 @@ export class ArenaScene {
       return;
     }
 
-    this.roundTimer = Math.max(0, this.roundTimer - dt);
+    if (this.roundIntroTimer > 0) {
+      this.roundIntroTimer = Math.max(0, this.roundIntroTimer - dt);
+      if (this.roundIntroTimer === 0) {
+        this.combat.spawnFloatingText(
+          this.camX,
+          this.camY - 60,
+          'LUTEM!',
+          '#38bdf8',
+          1.75
+        );
+      }
+    } else {
+      this.roundTimer = Math.max(0, this.roundTimer - dt);
+    }
 
-    const localInput = localFighter.hp > 0 ? this.input.sample() : createEmptyInput();
+    const canAct = this.roundIntroTimer <= 0;
+    const localInput =
+      canAct && localFighter.hp > 0 ? this.input.sample() : createEmptyInput();
     const frameInputs = new Map<FighterSlotId, FighterInputState>();
 
     for (const f of this.fighters) {
-      if (f.slot === this.localSlot) {
-        frameInputs.set(f.slot, localInput);
-      } else if (f.hp <= 0) {
+      if (!canAct || f.hp <= 0) {
         frameInputs.set(f.slot, createEmptyInput());
+      } else if (f.slot === this.localSlot) {
+        frameInputs.set(f.slot, localInput);
       } else if (this.botSlots.has(f.slot) && this.isHostAuthority()) {
         const ai = this.aiControllers.get(f.slot) ?? new AIController(this.difficulty);
         this.aiControllers.set(f.slot, ai);
@@ -882,6 +980,54 @@ export class ArenaScene {
     this.camZoom += (targetZoom - this.camZoom) * Math.min(1, dt * 5);
   }
 
+  private startNextRound(): void {
+    this.currentRound += 1;
+    this.pendingWinner = null;
+    this.pendingWinnerTeam = null;
+    this.pendingMatchOver = false;
+    this.koSlowMoTimer = 0;
+    this.roundTimer = this.roomMode === 'rumble' ? 150 : 99;
+    this.roundIntroTimer = 0.9;
+    this.p1ComboDisplay = 0;
+    this.p1ComboFade = 0;
+    this.p2ComboDisplay = 0;
+    this.p2ComboFade = 0;
+
+    this.combat.clearAll();
+
+    for (const f of this.fighters) {
+      const sp = this.fighterSpawns.get(f.slot) ?? {
+        x: f.team === 1 ? this.arenaMap.arenaLeft + 200 : this.arenaMap.arenaRight - 200,
+        y: this.arenaMap.groundY,
+        facing: (f.team === 1 ? 1 : -1) as 1 | -1,
+      };
+      f.resetForNewRound(sp.x, sp.y, sp.facing);
+    }
+
+    const local = this.getLocalFighter();
+    if (this.roomMode === 'rumble') {
+      this.camX = local ? local.x : this.arenaMap.width * 0.5;
+      this.camY = 360;
+      this.camZoom = 0.82;
+    } else {
+      this.camX = 640;
+      this.camY = 390;
+      this.camZoom = 1.05;
+    }
+
+    const roundTitle =
+      this.currentRound >= this.maxRounds
+        ? 'ROUND FINAL!'
+        : `ROUND ${this.currentRound}!`;
+    this.combat.spawnFloatingText(
+      this.camX,
+      this.camY - 60,
+      roundTitle,
+      '#facc15',
+      1.8
+    );
+  }
+
   private evaluateRoundEnd(): void {
     const team1 = this.fighters.filter((f) => f.team === 1);
     const team2 = this.fighters.filter((f) => f.team === 2);
@@ -909,6 +1055,17 @@ export class ArenaScene {
         Math.abs(t1Pct - t2Pct) < 0.001 ? 'draw' : t1Pct > t2Pct ? 1 : 2;
     }
 
+    if (winnerTeam === 1) {
+      this.team1RoundWins += 1;
+    } else if (winnerTeam === 2) {
+      this.team2RoundWins += 1;
+    }
+
+    const isMatchOver =
+      this.team1RoundWins >= this.winsRequired ||
+      this.team2RoundWins >= this.winsRequired ||
+      this.currentRound >= this.maxRounds;
+
     const winner: 'p1' | 'p2' | 'draw' =
       winnerTeam === 1 ? 'p1' : winnerTeam === 2 ? 'p2' : 'draw';
 
@@ -922,10 +1079,14 @@ export class ArenaScene {
         p2HpRemaining: this.p2?.hp ?? 0,
         hpRemainingMap: this.buildHpMap(),
         p1FinalPhase: this.p1?.phase ?? 1,
+        currentRound: this.currentRound,
+        team1RoundWins: this.team1RoundWins,
+        team2RoundWins: this.team2RoundWins,
+        matchOver: isMatchOver,
       });
     }
 
-    this.triggerKoSequence(winner, winnerTeam);
+    this.triggerKoSequence(winner, winnerTeam, isMatchOver);
   }
 
   public render(fps: number): void {
@@ -1110,6 +1271,17 @@ export class ArenaScene {
         </div>
 
         <div class="ak-hud-center">
+          <div class="ak-round-row">
+            <div class="ak-round-pips" id="hud-t1-pips">
+              <span class="ak-round-pip" data-pip="1"></span>
+              <span class="ak-round-pip" data-pip="2"></span>
+            </div>
+            <span class="ak-round-badge" id="hud-round-label">R1/3</span>
+            <div class="ak-round-pips" id="hud-t2-pips">
+              <span class="ak-round-pip p2" data-pip="1"></span>
+              <span class="ak-round-pip p2" data-pip="2"></span>
+            </div>
+          </div>
           <div class="ak-timer-box" id="hud-timer">99</div>
           <button type="button" class="ak-pause-btn" id="hud-pause-btn">PAUSA</button>
         </div>
@@ -1155,6 +1327,9 @@ export class ArenaScene {
       p2EvoFill: q('#hud-p2-evo'),
       p2EvoReady: q('#hud-p2-evo-ready'),
       timer: q('#hud-timer'),
+      roundLabel: q('#hud-round-label'),
+      t1Pips: Array.from(this.hudEl.querySelectorAll<HTMLElement>('#hud-t1-pips .ak-round-pip')),
+      t2Pips: Array.from(this.hudEl.querySelectorAll<HTMLElement>('#hud-t2-pips .ak-round-pip')),
       p1Combo: q('#hud-p1-combo'),
       p2Combo: q('#hud-p2-combo'),
       fps: q('#hud-fps'),
@@ -1204,6 +1379,17 @@ export class ArenaScene {
         </div>
 
         <div class="ak-hud-center">
+          <div class="ak-round-row">
+            <div class="ak-round-pips" id="hud-t1-pips">
+              <span class="ak-round-pip" data-pip="1"></span>
+              <span class="ak-round-pip" data-pip="2"></span>
+            </div>
+            <span class="ak-round-badge" id="hud-round-label">R1/3</span>
+            <div class="ak-round-pips" id="hud-t2-pips">
+              <span class="ak-round-pip p2" data-pip="1"></span>
+              <span class="ak-round-pip p2" data-pip="2"></span>
+            </div>
+          </div>
           <div class="ak-timer-box" id="hud-timer">150</div>
           <div class="ak-map-tag">${escapeHtml(this.arenaMap.themeName)} · ${escapeHtml(this.arenaMap.archetypeName)}</div>
           <button type="button" class="ak-pause-btn" id="hud-pause-btn">PAUSA</button>
@@ -1246,6 +1432,9 @@ export class ArenaScene {
     const q = (sel: string) => this.hudEl.querySelector<HTMLElement>(sel) ?? undefined;
     this.hudRefs = {
       timer: q('#hud-timer'),
+      roundLabel: q('#hud-round-label'),
+      t1Pips: Array.from(this.hudEl.querySelectorAll<HTMLElement>('#hud-t1-pips .ak-round-pip')),
+      t2Pips: Array.from(this.hudEl.querySelectorAll<HTMLElement>('#hud-t2-pips .ak-round-pip')),
       p1Combo: q('#hud-p1-combo'),
       p2Combo: q('#hud-p2-combo'),
       fps: q('#hud-fps'),
@@ -1342,6 +1531,26 @@ export class ArenaScene {
       if (this.hudRefs.timer.textContent !== sec) {
         this.hudRefs.timer.textContent = sec;
       }
+    }
+
+    if (this.hudRefs.roundLabel) {
+      const rTxt =
+        this.currentRound >= this.maxRounds
+          ? 'FINAL'
+          : `R${this.currentRound}/${this.maxRounds}`;
+      if (this.hudRefs.roundLabel.textContent !== rTxt) {
+        this.hudRefs.roundLabel.textContent = rTxt;
+      }
+    }
+    if (this.hudRefs.t1Pips) {
+      this.hudRefs.t1Pips.forEach((pip, idx) => {
+        pip.classList.toggle('won', idx < this.team1RoundWins);
+      });
+    }
+    if (this.hudRefs.t2Pips) {
+      this.hudRefs.t2Pips.forEach((pip, idx) => {
+        pip.classList.toggle('won', idx < this.team2RoundWins);
+      });
     }
 
     if (this.hudRefs.p1Combo) {

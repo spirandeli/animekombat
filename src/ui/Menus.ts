@@ -1634,6 +1634,15 @@ export class Menus {
     const leveledUp = xpSummary.newLevel > xpSummary.oldLevel;
     const unlockedNewPhase = xpSummary.newPhase > xpSummary.oldPhase;
     const inRoom = report.mode !== 'solo';
+    const hasRoundScore =
+      typeof report.team1RoundWins === 'number' &&
+      typeof report.team2RoundWins === 'number';
+    const roundScoreHtml = hasRoundScore
+      ? `<div style="margin-top:4px;font-weight:800;font-size:0.95rem;color:var(--ak-accent);">
+           Rounds: ${report.team1RoundWins} – ${report.team2RoundWins}
+           ${report.roundsPlayed ? `(${report.roundsPlayed} ${report.roundsPlayed === 1 ? 'round' : 'rounds'})` : ''}
+         </div>`
+      : '';
 
     return `
       <div class="ak-modal-backdrop">
@@ -1643,6 +1652,7 @@ export class Menus {
             ${escapeHtml(charName)} ${report.roomMode === 'rumble' ? 'lutou no Rumble Arena!' : `encerrou na <strong>Fase ${finalPhase}</strong>`}
             ${report.opponentLeft ? '<br/><span style="color:var(--ak-cyan);">Adversário desconectou da partida.</span>' : ''}
           </p>
+          ${roundScoreHtml}
           <div class="ak-panel" style="padding:12px;">
             <div style="font-weight:800;color:var(--ak-cyan);">+${xpSummary.xpGained} XP Obtido</div>
             <div style="margin-top:4px;font-size:0.9rem;">

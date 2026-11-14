@@ -144,6 +144,9 @@ export interface RemoteFighterSyncPayload {
   peerHp?: number;
   hpMap?: Partial<Record<FighterSlotId, number>>;
   roundTimer?: number;
+  currentRound?: number;
+  team1RoundWins?: number;
+  team2RoundWins?: number;
   ki: number;
   evoEnergy: number;
   phase: number;
@@ -167,6 +170,10 @@ export interface CombatEventPayload {
   p2HpRemaining?: number;
   hpRemainingMap?: Partial<Record<FighterSlotId, number>>;
   p1FinalPhase?: number;
+  currentRound?: number;
+  team1RoundWins?: number;
+  team2RoundWins?: number;
+  matchOver?: boolean;
 }
 
 export interface NetworkEventMap {
