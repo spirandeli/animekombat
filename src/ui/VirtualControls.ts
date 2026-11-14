@@ -38,14 +38,34 @@ export class VirtualControls {
   public setVisible(show: boolean): void {
     this.visible = show;
     const shouldShow = show && this.input.isTouchMode();
+    if (!shouldShow) {
+      this.resetTouchState();
+    }
     this.rootEl.classList.toggle('hidden', !shouldShow);
     this.rootEl.setAttribute('aria-hidden', String(!shouldShow));
   }
 
   public syncInputMode(isTouch: boolean): void {
     const shouldShow = this.visible && isTouch;
+    if (!shouldShow) {
+      this.resetTouchState();
+    }
     this.rootEl.classList.toggle('hidden', !shouldShow);
     this.rootEl.setAttribute('aria-hidden', String(!shouldShow));
+  }
+
+  public resetTouchState(): void {
+    this.stickPointerId = null;
+    this.stickRect = null;
+    if (this.stickKnobEl) {
+      this.stickKnobEl.style.transform = 'translate(0px, 0px)';
+    }
+    this.buttonPointers.clear();
+    this.buttonEls.forEach((btn, action) => {
+      btn.classList.remove('pressed');
+      this.input.setTouchAction(action, false);
+    });
+    this.input.setTouchAxis(0, 0);
   }
 
   public setAppearance(opacity: number, scale: number, haptic: boolean): void {
@@ -75,22 +95,28 @@ export class VirtualControls {
     cooldowns: Record<'a1' | 'a2' | 'a3' | 'a4', number>,
     hasKi: Record<'a1' | 'a2' | 'a3' | 'a4', boolean>,
     canEvolve: boolean,
-    moveNames: Record<'a1' | 'a2' | 'a3' | 'a4', string>
+    moveNames: Record<'a1' | 'a2' | 'a3' | 'a4', string>,
+    globalCooldownRatio = 0
   ): void {
     const attackKeys: Array<'a1' | 'a2' | 'a3' | 'a4'> = ['a1', 'a2', 'a3', 'a4'];
+    const globalActive = globalCooldownRatio > 0.01;
     for (const k of attackKeys) {
       const btn = this.buttonEls.get(k);
       const cdEl = this.cooldownEls.get(k);
       const subEl = this.subtitleEls.get(k);
+      const effectiveCd = Math.max(0, Math.min(1, Math.max(cooldowns[k], globalCooldownRatio)));
       if (btn) {
         btn.classList.toggle('insufficient', !hasKi[k]);
+        btn.classList.toggle('global-cooldown', globalActive && cooldowns[k] <= 0.01);
         if (k === 'a4') {
-          btn.classList.toggle('ready-ult', hasKi.a4 && cooldowns.a4 <= 0.01);
+          btn.classList.toggle(
+            'ready-ult',
+            hasKi.a4 && cooldowns.a4 <= 0.01 && !globalActive
+          );
         }
       }
       if (cdEl) {
-        const ratio = Math.max(0, Math.min(1, cooldowns[k]));
-        cdEl.style.transform = `scaleY(${ratio.toFixed(3)})`;
+        cdEl.style.transform = `scaleY(${effectiveCd.toFixed(3)})`;
       }
       if (subEl && subEl.textContent !== moveNames[k]) {
         subEl.textContent = moveNames[k];
@@ -193,6 +219,7 @@ export class VirtualControls {
 
     stickZone.addEventListener('pointerup', releaseStick);
     stickZone.addEventListener('pointercancel', releaseStick);
+    stickZone.addEventListener('lostpointercapture', releaseStick);
 
     // Botões de ação multi-touch simultâneos
     this.buttonEls.forEach((btn, action) => {
@@ -215,6 +242,14 @@ export class VirtualControls {
 
       btn.addEventListener('pointerup', releaseButton);
       btn.addEventListener('pointercancel', releaseButton);
+      btn.addEventListener('lostpointercapture', releaseButton);
+    });
+
+    window.addEventListener('blur', () => this.resetTouchState());
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        this.resetTouchState();
+      }
     });
   }
 

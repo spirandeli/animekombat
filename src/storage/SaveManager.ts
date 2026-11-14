@@ -1,6 +1,58 @@
 import { AIDifficulty } from '../game/AIController';
 import { phaseForLevel } from '../game/Fighter';
 
+export type BindableAction =
+  | 'left'
+  | 'right'
+  | 'up'
+  | 'down'
+  | 'a1'
+  | 'a2'
+  | 'a3'
+  | 'a4'
+  | 'block'
+  | 'jump'
+  | 'evolve'
+  | 'pause';
+
+export type KeyBindings = Record<BindableAction, string[]>;
+export type GamepadBindings = Record<BindableAction, number[]>;
+export type CombatPace = 'tactical' | 'classic';
+
+export function createDefaultKeyBindings(): KeyBindings {
+  return {
+    left: ['KeyA', 'ArrowLeft'],
+    right: ['KeyD', 'ArrowRight'],
+    up: ['KeyW', 'ArrowUp'],
+    down: ['KeyS', 'ArrowDown'],
+    a1: ['KeyJ', 'KeyZ'],
+    a2: ['KeyK', 'KeyX'],
+    a3: ['KeyL', 'KeyC'],
+    a4: ['KeyU', 'KeyV'],
+    block: ['KeyI', 'ShiftRight', 'ShiftLeft'],
+    jump: ['Space'],
+    evolve: ['KeyE', 'KeyR'],
+    pause: ['Escape', 'KeyP'],
+  };
+}
+
+export function createDefaultGamepadBindings(): GamepadBindings {
+  return {
+    left: [14],
+    right: [15],
+    up: [12],
+    down: [13],
+    a1: [2],
+    a2: [3],
+    a3: [1],
+    a4: [5],
+    block: [4, 6],
+    jump: [0],
+    evolve: [7, 8],
+    pause: [9],
+  };
+}
+
 export interface CharacterProgress {
   xp: number;
   level: number;
@@ -20,6 +72,10 @@ export interface GameSettings {
   bgmMuted: boolean;
   sfxMuted: boolean;
   difficulty: AIDifficulty;
+  keyBindings: KeyBindings;
+  gamepadBindings: GamepadBindings;
+  gamepadDeadzone: number;
+  combatPace: CombatPace;
 }
 
 export interface SaveData {
@@ -55,6 +111,10 @@ export function createDefaultSave(): SaveData {
       bgmMuted: false,
       sfxMuted: false,
       difficulty: 'medium',
+      keyBindings: createDefaultKeyBindings(),
+      gamepadBindings: createDefaultGamepadBindings(),
+      gamepadDeadzone: 0.26,
+      combatPace: 'tactical',
     },
   };
 }
@@ -199,6 +259,42 @@ export class SaveManager {
 
   private mergeWithDefaults(partial: Partial<SaveData>): SaveData {
     const def = createDefaultSave();
+    const rawSettings = (partial.settings ?? {}) as Partial<GameSettings>;
+    const rawKb = (rawSettings.keyBindings ?? {}) as Partial<KeyBindings>;
+    const rawGb = (rawSettings.gamepadBindings ?? {}) as Partial<GamepadBindings>;
+
+    const mergedKb = createDefaultKeyBindings();
+    for (const action of Object.keys(mergedKb) as BindableAction[]) {
+      const candidate = rawKb[action];
+      if (Array.isArray(candidate)) {
+        const cleaned = candidate.filter((c) => typeof c === 'string' && c.length > 0);
+        if (cleaned.length > 0) {
+          mergedKb[action] = cleaned;
+        }
+      }
+    }
+
+    const mergedGb = createDefaultGamepadBindings();
+    for (const action of Object.keys(mergedGb) as BindableAction[]) {
+      const candidate = rawGb[action];
+      if (Array.isArray(candidate)) {
+        const cleaned = candidate.filter((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0);
+        if (cleaned.length > 0) {
+          mergedGb[action] = cleaned;
+        }
+      }
+    }
+
+    const pace: CombatPace =
+      rawSettings.combatPace === 'classic' || rawSettings.combatPace === 'tactical'
+        ? rawSettings.combatPace
+        : def.settings.combatPace;
+
+    const gpDeadzone =
+      typeof rawSettings.gamepadDeadzone === 'number' && Number.isFinite(rawSettings.gamepadDeadzone)
+        ? Math.max(0.12, Math.min(0.5, rawSettings.gamepadDeadzone))
+        : def.settings.gamepadDeadzone;
+
     return {
       version: 1,
       characters: {
@@ -207,7 +303,11 @@ export class SaveManager {
       },
       settings: {
         ...def.settings,
-        ...(partial.settings ?? {}),
+        ...rawSettings,
+        keyBindings: mergedKb,
+        gamepadBindings: mergedGb,
+        gamepadDeadzone: gpDeadzone,
+        combatPace: pace,
       },
     };
   }

@@ -34,17 +34,21 @@ async function bootstrap(): Promise<void> {
     virtualControls.syncInputMode(isTouch);
   });
 
+  const arena = new ArenaScene(canvas, spriteLoader, input, virtualControls, audio);
+  arena.setNetworkClient(net);
+
   const applySettings = () => {
     const s = save.getData().settings;
     virtualControls.setAppearance(s.controlsOpacity, s.controlsScale, s.hapticFeedback);
     input.setStickDeadzone(s.stickDeadzone);
     input.setJumpViaStick(s.jumpViaStick);
+    input.setKeyBindings(s.keyBindings);
+    input.setGamepadBindings(s.gamepadBindings);
+    input.setGamepadDeadzone(s.gamepadDeadzone);
+    arena.setCombatPace(s.combatPace);
     audio.setVolumes(s.bgmVolume, s.sfxVolume, s.bgmMuted, s.sfxMuted);
   };
   applySettings();
-
-  const arena = new ArenaScene(canvas, spriteLoader, input, virtualControls, audio);
-  arena.setNetworkClient(net);
 
   let manualPause = false;
   let orientationPause = false;
@@ -66,9 +70,26 @@ async function bootstrap(): Promise<void> {
       arena.update(dt);
     },
     (_alpha, fps) => {
+      if (
+        manualPause &&
+        !orientationPause &&
+        arena.isActive() &&
+        !input.isCapturing() &&
+        input.pollGamepadPauseEdge()
+      ) {
+        manualPause = false;
+        input.resetAll();
+        virtualControls.resetTouchState();
+        menus.closePause();
+        syncPauseState();
+      }
       arena.render(fps);
     },
     (hidden) => {
+      if (hidden) {
+        input.resetAll();
+        virtualControls.resetTouchState();
+      }
       if (hidden && arena.isActive() && !arena.isOnlineMatch()) {
         manualPause = true;
         menus.openPause();
@@ -81,7 +102,11 @@ async function bootstrap(): Promise<void> {
 
   const startMatchFlow = async (config: MatchConfig) => {
     const seed = config.mapSeed ?? ((Math.floor(Math.random() * 0x7fffffff) >>> 0) || 1337);
-    const resolvedConfig: MatchConfig = { ...config, mapSeed: seed };
+    const resolvedConfig: MatchConfig = {
+      ...config,
+      mapSeed: seed,
+      combatPace: config.combatPace ?? save.getData().settings.combatPace,
+    };
     lastConfig = resolvedConfig;
     manualPause = false;
     menus.setActiveMatchMode(resolvedConfig.mode ?? 'solo');
@@ -126,10 +151,12 @@ async function bootstrap(): Promise<void> {
     syncPauseState();
   };
 
-  const menus = new Menus(manifest, save, pwa, audio, net, {
+  const menus = new Menus(manifest, save, pwa, audio, net, input, {
     onStartMatch: startMatchFlow,
     onResumeMatch: () => {
       manualPause = false;
+      input.resetAll();
+      virtualControls.resetTouchState();
       syncPauseState();
     },
     onRestartMatch: () => {
@@ -179,9 +206,15 @@ async function bootstrap(): Promise<void> {
     arena.handlePlayerLeft(slot, username);
   });
 
+  input.setOnGamepadChange(() => {
+    menus.refreshGamepadStatus();
+  });
+
   arena.setCallbacks(
     () => {
       if (!arena.isActive()) return;
+      input.resetAll();
+      virtualControls.resetTouchState();
       if (!arena.isOnlineMatch()) {
         manualPause = true;
         syncPauseState();
@@ -213,10 +246,14 @@ async function bootstrap(): Promise<void> {
     }
   );
 
-  // Tecla Escape para pausar/retomar no desktop
+  // Tecla de pausa configurável (padrão Escape / P) para pausar/retomar no desktop
   window.addEventListener('keydown', (e) => {
-    if (e.code === 'Escape' && arena.isActive()) {
+    if (input.isCapturing()) return;
+    if (input.matchesPauseKey(e.code) && arena.isActive()) {
+      e.preventDefault();
       manualPause = !manualPause;
+      input.resetAll();
+      virtualControls.resetTouchState();
       syncPauseState();
       if (manualPause) {
         menus.openPause();

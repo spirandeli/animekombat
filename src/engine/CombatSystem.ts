@@ -44,6 +44,7 @@ interface Projectile {
   frames: LoadedFrame[];
   elapsed: number;
   life: number;
+  trailTimer: number;
 }
 
 interface Particle {
@@ -129,6 +130,7 @@ export class CombatSystem {
     frames: [],
     elapsed: 0,
     life: 0,
+    trailTimer: 0,
   }));
 
   private readonly particlePool: Particle[] = Array.from({ length: 200 }, () => ({
@@ -218,6 +220,8 @@ export class CombatSystem {
   ): void {
     const frames = fighter.phasePack.vfx.get(vfxKey);
     if (!frames || frames.length === 0) return;
+    const refQuadH = frames[0].meta.quadH || 384;
+    const normScale = scale * (384 / Math.max(240, refQuadH));
     const angle = Math.atan2(
       fighter.attackDirY,
       fighter.attackDirX * fighter.facing
@@ -228,7 +232,7 @@ export class CombatSystem {
       y,
       fighter.facing,
       duration,
-      scale,
+      normScale,
       followOwner ? fighter : undefined,
       angle
     );
@@ -269,7 +273,8 @@ export class CombatSystem {
         proj.auraColor = fighter.phasePack.manifest.auraColor || '#38bdf8';
         proj.frames = frames;
         proj.elapsed = 0;
-        proj.life = 1.65;
+        proj.life = 1.75;
+        proj.trailTimer = 0;
         return;
       }
     }
@@ -372,10 +377,7 @@ export class CombatSystem {
       return false;
     }
 
-    // Empurrão suave de corpo entre lutadores vivos próximos
-    this.resolveBodyPushMulti(fighters);
-
-    // Colisões corpo a corpo entre times opostos
+    // Colisões corpo a corpo entre times opostos (pushbox é aplicado em ArenaScene pós-movimento)
     for (let i = 0; i < fighters.length; i++) {
       const attacker = fighters[i];
       if (attacker.hp <= 0) continue;
@@ -393,27 +395,70 @@ export class CombatSystem {
     return true;
   }
 
-  private resolveBodyPushMulti(fighters: Fighter[]): void {
-    const minDist = 66;
-    for (let i = 0; i < fighters.length; i++) {
-      const a = fighters[i];
-      if (a.hp <= 0) continue;
-      for (let j = i + 1; j < fighters.length; j++) {
-        const b = fighters[j];
-        if (b.hp <= 0) continue;
-        const dx = b.x - a.x;
-        const dy = Math.abs(b.y - a.y);
-        if (Math.abs(dx) < minDist && dy < 95) {
-          const overlap = (minDist - Math.abs(dx)) * 0.5;
-          const sign = dx >= 0 ? 1 : -1;
-          a.x = Math.max(
-            a.arenaLeft,
-            Math.min(a.arenaRight, a.x - sign * overlap)
-          );
-          b.x = Math.max(
-            b.arenaLeft,
-            Math.min(b.arenaRight, b.x + sign * overlap)
-          );
+  public resolveBodyPushMulti(fighters: Fighter[], dt = 1 / 60): void {
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < fighters.length; i++) {
+        const a = fighters[i];
+        if (a.hp <= 0) continue;
+        for (let j = i + 1; j < fighters.length; j++) {
+          const b = fighters[j];
+          if (b.hp <= 0) continue;
+          const dx = b.x - a.x;
+          const absDx = Math.abs(dx);
+          const dy = Math.abs(b.y - a.y);
+          const minDist = Math.max(100, Math.round(a.getPushRadius() + b.getPushRadius()));
+
+          if (absDx < minDist && dy < 115) {
+            const needed = minDist - absDx;
+            const sign =
+              absDx > 0.5
+                ? dx > 0
+                  ? 1
+                  : -1
+                : a.slot < b.slot
+                  ? 1
+                  : -1;
+            const prevAx = a.x;
+            const prevBx = b.x;
+            a.x = Math.max(
+              a.arenaLeft,
+              Math.min(a.arenaRight, a.x - sign * needed * 0.5)
+            );
+            b.x = Math.max(
+              b.arenaLeft,
+              Math.min(b.arenaRight, b.x + sign * needed * 0.5)
+            );
+            const movedA = Math.abs(a.x - prevAx);
+            const movedB = Math.abs(b.x - prevBx);
+            const leftover = needed - (movedA + movedB);
+            if (leftover > 0.1) {
+              // Transfere excedente quando um lutador está encostado na parede da arena
+              a.x = Math.max(
+                a.arenaLeft,
+                Math.min(a.arenaRight, a.x - sign * leftover)
+              );
+              b.x = Math.max(
+                b.arenaLeft,
+                Math.min(b.arenaRight, b.x + sign * leftover)
+              );
+            }
+          } else if (
+            dy >= 95 &&
+            dy < 150 &&
+            absDx < minDist * 0.72 &&
+            (!a.grounded || !b.grounded)
+          ) {
+            // Escorregamento aéreo suave evita cair exatamente em cima do outro lutador
+            const slideSign =
+              absDx > 2 ? (dx > 0 ? 1 : -1) : a.slot < b.slot ? 1 : -1;
+            const slide = 210 * dt;
+            if (!a.grounded) {
+              a.x = Math.max(a.arenaLeft, Math.min(a.arenaRight, a.x - slideSign * slide));
+            }
+            if (!b.grounded) {
+              b.x = Math.max(b.arenaLeft, Math.min(b.arenaRight, b.x + slideSign * slide));
+            }
+          }
         }
       }
     }
@@ -529,6 +574,11 @@ export class CombatSystem {
       proj.y += proj.vy * dt;
       proj.elapsed += dt;
       proj.life -= dt;
+      proj.trailTimer -= dt;
+      if (proj.trailTimer <= 0) {
+        proj.trailTimer = 0.04;
+        this.spawnBurstParticles(proj.x, proj.y, proj.auraColor, 2, 70);
+      }
 
       const outOfBounds =
         proj.x < arenaLeft - 160 ||
@@ -536,14 +586,14 @@ export class CombatSystem {
         proj.y < -280 ||
         proj.y > 920;
       if (proj.life <= 0 || outOfBounds) {
-        if (!outOfBounds && proj.frames.length >= 3) {
+        if (!outOfBounds && proj.frames.length >= 2) {
           this.enqueueVfxFrames(
-            proj.frames.slice(2),
+            proj.frames.slice(Math.max(0, proj.frames.length - 2)),
             proj.x,
             proj.y,
             proj.facing,
-            0.22,
-            0.48,
+            0.24,
+            0.48 * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
             undefined,
             proj.angle
           );
@@ -570,14 +620,14 @@ export class CombatSystem {
 
       const attacker = fighters.find((f) => f.slot === proj.ownerSlot);
       proj.active = false;
-      if (proj.frames.length >= 3) {
+      if (proj.frames.length >= 2) {
         this.enqueueVfxFrames(
-          proj.frames.slice(2),
+          proj.frames.slice(Math.max(0, proj.frames.length - 2)),
           proj.x,
           proj.y,
           proj.facing,
-          0.24,
-          0.52,
+          0.26,
+          0.52 * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
           undefined,
           proj.angle
         );
@@ -692,7 +742,7 @@ export class CombatSystem {
     }
 
     ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 0.92 * alpha;
+    ctx.globalAlpha = 0.84 * alpha;
     ctx.drawImage(
       frame.image,
       -frame.meta.anchorX,
@@ -702,7 +752,7 @@ export class CombatSystem {
     );
 
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.22 * alpha;
+    ctx.globalAlpha = 0.24 * alpha;
     ctx.drawImage(
       frame.image,
       -frame.meta.anchorX,
@@ -715,41 +765,76 @@ export class CombatSystem {
   }
 
   public render(ctx: CanvasRenderingContext2D): void {
-    // VFX de ataques 2x2
+    // VFX de ataques com crossfade entre quadros e curva pop-in/fade-out
     for (const v of this.vfxPool) {
       if (!v.active || v.frames.length === 0) continue;
-      const progress = v.elapsed / v.duration;
-      const idx = Math.min(
-        v.frames.length - 1,
-        Math.floor(progress * v.frames.length)
-      );
+      const progress = Math.max(0, Math.min(1, v.elapsed / v.duration));
+      const exact = progress * v.frames.length;
+      const idx = Math.min(v.frames.length - 1, Math.floor(exact));
+      const frac = exact - idx;
       const fadeAlpha =
-        progress > 0.75 ? Math.max(0, 1 - (progress - 0.75) / 0.25) : 1;
-      this.drawCelVfxFrame(
-        ctx,
-        v.frames[idx],
-        v.x,
-        v.y,
-        v.facing,
-        v.scale,
-        fadeAlpha,
-        v.angle
-      );
+        progress > 0.72 ? Math.max(0, 1 - (progress - 0.72) / 0.28) : 1;
+      const popScale =
+        v.scale *
+        (progress < 0.14
+          ? 0.84 + 0.22 * (progress / 0.14)
+          : 1.06 - 0.1 * progress);
+
+      if (idx < v.frames.length - 1 && frac > 0.68) {
+        const blend = (frac - 0.68) / 0.32;
+        this.drawCelVfxFrame(
+          ctx,
+          v.frames[idx],
+          v.x,
+          v.y,
+          v.facing,
+          popScale,
+          fadeAlpha * (1 - blend),
+          v.angle
+        );
+        this.drawCelVfxFrame(
+          ctx,
+          v.frames[idx + 1],
+          v.x,
+          v.y,
+          v.facing,
+          popScale,
+          fadeAlpha * blend,
+          v.angle
+        );
+      } else {
+        this.drawCelVfxFrame(
+          ctx,
+          v.frames[idx],
+          v.x,
+          v.y,
+          v.facing,
+          popScale,
+          fadeAlpha,
+          v.angle
+        );
+      }
     }
 
-    // Projéteis (quadros 1..2 durante o voo; quadros 3..4 ao colidir)
+    // Projéteis animados em loop durante o voo
     for (const proj of this.projPool) {
       if (!proj.active) continue;
       if (proj.frames.length > 0) {
-        const idx =
-          proj.elapsed < 0.06 ? 0 : Math.min(1, proj.frames.length - 1);
+        const flyCount =
+          proj.frames.length > 2 ? proj.frames.length - 2 : proj.frames.length;
+        const idx = Math.floor(proj.elapsed * 14) % Math.max(1, flyCount);
+        const frame = proj.frames[idx];
+        const normScale =
+          0.44 *
+          (384 / Math.max(240, frame.meta.quadH || 384)) *
+          (1 + 0.05 * Math.sin(proj.elapsed * 26));
         this.drawCelVfxFrame(
           ctx,
-          proj.frames[idx],
+          frame,
           proj.x,
           proj.y,
           proj.facing,
-          0.44,
+          normScale,
           1,
           proj.angle
         );

@@ -1667,3 +1667,193 @@ body {
     height: 7px;
   }
 }
+
+/* =========================================================
+   AJUDA, CONTROLES, REMAPEAMENTO & CADÊNCIA DE COMBATE
+   ========================================================= */
+.ak-modal-wide {
+  max-width: 660px;
+}
+
+.ak-gamepad-pill.connected {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 800;
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.16);
+  border: 1px solid rgba(34, 197, 94, 0.45);
+}
+
+.ak-gamepad-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.ak-gamepad-banner.connected {
+  color: #dcfce7;
+  background: rgba(20, 83, 45, 0.35);
+  border-color: rgba(34, 197, 94, 0.5);
+}
+
+.ak-gamepad-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #64748b;
+}
+
+.ak-gamepad-banner.connected .ak-gamepad-dot {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+}
+
+.ak-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ak-tab-btn {
+  flex: 1 1 110px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--ak-border);
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.ak-tab-btn.active {
+  color: #04101d;
+  background: linear-gradient(135deg, #38bdf8, #22d3ee);
+  border-color: transparent;
+}
+
+.ak-help-note {
+  font-size: 0.78rem;
+  color: #94a3b8;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.ak-remap-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 44dvh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.ak-remap-row {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.ak-remap-action {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.ak-remap-keys {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #38bdf8;
+}
+
+@keyframes akCapturePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.45); }
+  50% { box-shadow: 0 0 0 6px rgba(250, 204, 21, 0); }
+}
+
+.ak-capturing {
+  animation: akCapturePulse 1s infinite;
+}
+
+.ak-help-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.ak-help-card {
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.ak-help-card h4 {
+  margin: 0 0 5px 0;
+  font-size: 0.84rem;
+  color: #38bdf8;
+}
+
+.ak-help-card p {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: #cbd5e1;
+}
+
+.ak-cadence-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 96px;
+}
+
+.ak-cadence-label {
+  font-size: 0.54rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  color: #e2e8f0;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+}
+
+.ak-cadence-track {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  overflow: hidden;
+}
+
+.ak-cadence-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  transition: width 60ms linear;
+}
+
+.ak-cadence-fill.ready {
+  background: linear-gradient(90deg, #22d3ee, #34d399);
+}
+
+.ak-vbtn.global-cooldown {
+  opacity: 0.72;
+}

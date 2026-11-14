@@ -46,6 +46,7 @@ export interface FrameMeta {
   rawH: number;
   anchorX: number;
   anchorY: number;
+  clippedEdges?: string[];
 }
 
 export interface PhaseManifest {
@@ -267,34 +268,36 @@ export class SpriteLoader {
   }
 
   /**
-   * Fallback de runtime: carrega uma folha 2x2 com fundo #FF00FF via OffscreenCanvas,
-   * aplica chroma-key anti-spill e fatia nos 4 quadrantes (1=TL, 2=TR, 3=BL, 4=BR).
+   * Fallback de runtime: carrega uma folha 2x2 ou 3x2 com fundo #FF00FF via OffscreenCanvas,
+   * aplica chroma-key anti-spill aprimorado e fatia em ordem de leitura.
    */
   public async loadRaw2x2SheetFallback(
     url: string,
-    isVfx = false
+    isVfx = false,
+    cols = 2,
+    rows = 2
   ): Promise<LoadedFrame[]> {
-    const cacheKey = `${url}:${isVfx ? 'vfx' : 'char'}`;
+    const cacheKey = `${url}:${isVfx ? 'vfx' : 'char'}:${cols}x${rows}`;
     const existing = this.fallbackCache.get(cacheKey);
     if (existing) return existing;
 
     const img = await this.fetchImageBitmap(url);
     const w = img.width;
     const h = img.height;
-    const qw = Math.floor(w / 2);
-    const qh = Math.floor(h / 2);
+    const qw = Math.floor(w / cols);
+    const qh = Math.floor(h / rows);
 
-    const rects: Array<[number, number]> = [
-      [0, 0],
-      [qw, 0],
-      [0, qh],
-      [qw, qh],
-    ];
+    const rects: Array<[number, number]> = [];
+    for (let ry = 0; ry < rows; ry++) {
+      for (let cx = 0; cx < cols; cx++) {
+        rects.push([cx * qw, ry * qh]);
+      }
+    }
 
-    const lowT = isVfx ? 52 : 40;
-    const highT = isVfx ? 128 : 112;
+    const lowT = isVfx ? 36 : 32;
+    const highT = isVfx ? 112 : 100;
     const span = highT - lowT;
-    const spillStart = isVfx ? 42 : 32;
+    const spillStart = isVfx ? 16 : 14;
 
     const frames: LoadedFrame[] = [];
     for (const [sx, sy] of rects) {

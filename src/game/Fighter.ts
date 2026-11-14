@@ -6,6 +6,7 @@ import {
   LoadedPhasePack,
   SpriteLoader,
 } from '../engine/SpriteLoader';
+import type { CombatPace } from '../storage/SaveManager';
 import type { ArenaPlatform } from './ArenaMap';
 
 export type FighterSlotId = 'p1' | 'p2' | 'p3' | 'p4' | 'p5' | 'p6';
@@ -57,62 +58,62 @@ export const ATTACK_SPECS: Record<
   ataque_1: {
     action: 'ataque_1',
     vfx: 'vfx_ataque_1',
-    duration: 0.34,
+    duration: 0.42,
     activeStart: 0.28,
     activeEnd: 0.72,
     damage: 58,
     kiCost: 0,
     kiGainOnHit: 10,
-    cooldown: 0.28,
+    cooldown: 0.9,
     knockbackX: 165,
     knockbackY: -60,
     hitstun: 0.26,
     hitStop: 0.045,
-    lungeX: 90,
+    lungeX: 0,
     isProjectile: false,
     projectileSpeed: 0,
-    rangeW: 112,
-    rangeH: 90,
+    rangeW: 126,
+    rangeH: 92,
     offsetY: -95,
   },
   ataque_2: {
     action: 'ataque_2',
     vfx: 'vfx_ataque_2',
-    duration: 0.48,
-    activeStart: 0.30,
+    duration: 0.58,
+    activeStart: 0.3,
     activeEnd: 0.75,
     damage: 98,
     kiCost: 12,
     kiGainOnHit: 12,
-    cooldown: 0.65,
-    knockbackX: 310,
-    knockbackY: -195,
+    cooldown: 1.5,
+    knockbackX: 300,
+    knockbackY: -190,
     hitstun: 0.38,
     hitStop: 0.075,
-    lungeX: 340,
+    lungeX: 135,
     isProjectile: false,
     projectileSpeed: 0,
-    rangeW: 128,
-    rangeH: 100,
+    rangeW: 132,
+    rangeH: 102,
     offsetY: -96,
   },
   ataque_3: {
     action: 'ataque_3',
     vfx: 'vfx_ataque_3',
-    duration: 0.54,
+    duration: 0.64,
     activeStart: 0.38,
     activeEnd: 0.65,
     damage: 115,
     kiCost: 25,
     kiGainOnHit: 10,
-    cooldown: 1.05,
+    cooldown: 2.1,
     knockbackX: 250,
     knockbackY: -140,
     hitstun: 0.34,
     hitStop: 0.065,
-    lungeX: -30,
+    lungeX: 0,
     isProjectile: true,
-    projectileSpeed: 640,
+    projectileSpeed: 530,
     rangeW: 110,
     rangeH: 90,
     offsetY: -98,
@@ -120,25 +121,34 @@ export const ATTACK_SPECS: Record<
   ataque_4: {
     action: 'ataque_4',
     vfx: 'vfx_ataque_4',
-    duration: 0.82,
+    duration: 0.96,
     activeStart: 0.36,
     activeEnd: 0.84,
     damage: 245,
     kiCost: 65,
     kiGainOnHit: 0,
-    cooldown: 3.0,
-    knockbackX: 480,
-    knockbackY: -310,
+    cooldown: 4.2,
+    knockbackX: 470,
+    knockbackY: -305,
     hitstun: 0.56,
     hitStop: 0.14,
-    lungeX: 220,
+    lungeX: 85,
     isProjectile: false,
     projectileSpeed: 0,
-    rangeW: 210,
+    rangeW: 215,
     rangeH: 170,
     offsetY: -108,
   },
 };
+
+interface AfterimageSnapshot {
+  frame: LoadedFrame;
+  x: number;
+  y: number;
+  facing: 1 | -1;
+  age: number;
+  maxAge: number;
+}
 
 export interface Rect {
   x: number;
@@ -217,21 +227,28 @@ export class Fighter {
     ataque_3: 0,
     ataque_4: 0,
   };
+  public globalAttackCooldown = 0;
+  public globalAttackMax = 1.0;
+  public combatPace: CombatPace = 'tactical';
+  public nearestEnemyDist = Infinity;
+  public nearestAnyDist = Infinity;
 
   public phasePack: LoadedPhasePack;
   private readonly spriteLoader: SpriteLoader;
   private callbacks?: FighterCallbacks;
   private evolvingPending = false;
-  private lastOpponentX = 640;
+  private afterimages: AfterimageSnapshot[] = [];
+  private afterimageTimer = 0;
+  private hasMoveInputInAttack = false;
 
   // Constantes de física e escala
   public static readonly GROUND_Y = 540;
   public static readonly ARENA_LEFT = 70;
   public static readonly ARENA_RIGHT = 1210;
   public static readonly TARGET_BODY_HEIGHT = 186;
-  private static readonly GRAVITY = 2150;
-  private static readonly JUMP_VEL = -790;
-  private static readonly BASE_SPEED = 365;
+  private static readonly GRAVITY = 1880;
+  private static readonly JUMP_VEL = -735;
+  private static readonly BASE_SPEED = 308;
 
   constructor(
     slot: FighterSlotId,
@@ -257,11 +274,23 @@ export class Fighter {
     this.level = level;
     this.phasePack = phasePack;
     this.spriteLoader = spriteLoader;
-    this.lastOpponentX = startX + facing * 120;
   }
 
   public setCallbacks(cb: FighterCallbacks): void {
     this.callbacks = cb;
+  }
+
+  public setCombatPace(pace: CombatPace): void {
+    this.combatPace = pace;
+  }
+
+  public getPushRadius(): number {
+    return 52;
+  }
+
+  public getGlobalCooldownRatio(): number {
+    if (this.globalAttackCooldown <= 0 || this.globalAttackMax <= 0) return 0;
+    return Math.min(1, this.globalAttackCooldown / this.globalAttackMax);
   }
 
   public resetForNewRound(spawnX: number, spawnY: number, facing: 1 | -1): void {
@@ -294,6 +323,13 @@ export class Fighter {
     this.comboResetTimer = 0;
     this.auraFlashTime = 0;
     this.evolvingPending = false;
+    this.globalAttackCooldown = 0;
+    this.globalAttackMax = 1.0;
+    this.nearestEnemyDist = Infinity;
+    this.nearestAnyDist = Infinity;
+    this.hasMoveInputInAttack = false;
+    this.afterimages = [];
+    this.afterimageTimer = 0;
     this.cooldowns.ataque_1 = 0;
     this.cooldowns.ataque_2 = 0;
     this.cooldowns.ataque_3 = 0;
@@ -313,10 +349,10 @@ export class Fighter {
   ): AttackSpec {
     const base = ATTACK_SPECS[action];
     if (this.charId === 'luffy') {
-      if (action === 'ataque_1') return { ...base, rangeW: 195, lungeX: 110 };
-      if (action === 'ataque_2') return { ...base, rangeW: 215, lungeX: 280 };
+      if (action === 'ataque_1') return { ...base, rangeW: 195, lungeX: 0 };
+      if (action === 'ataque_2') return { ...base, rangeW: 215, lungeX: 145 };
       if (action === 'ataque_3' && this.phase <= 3) {
-        return { ...base, rangeW: 240, projectileSpeed: 780 };
+        return { ...base, rangeW: 240, projectileSpeed: 630 };
       }
     } else if (this.charId === 'sukuna') {
       if (action === 'ataque_1') return { ...base, rangeW: 135 };
@@ -400,23 +436,26 @@ export class Fighter {
     this.stateTime += dt;
 
     const list = Array.isArray(opponents) ? opponents : [opponents];
-    let nearestEnemy: Fighter | null = null;
-    let bestDist = Infinity;
+    let bestHorizDist = Infinity;
+    let bestAnyDist = Infinity;
     for (const candidate of list) {
-      if (candidate === this || candidate.team === this.team || candidate.hp <= 0) {
+      if (candidate === this || candidate.hp <= 0) {
         continue;
       }
-      const d = Math.abs(candidate.x - this.x) + Math.abs(candidate.y - this.y) * 0.5;
-      if (d < bestDist) {
-        bestDist = d;
-        nearestEnemy = candidate;
+      const sameBand = Math.abs(candidate.y - this.y) < 120;
+      const horiz = Math.abs(candidate.x - this.x);
+      if (sameBand && horiz < bestAnyDist) {
+        bestAnyDist = horiz;
+      }
+      if (candidate.team !== this.team && sameBand && horiz < bestHorizDist) {
+        bestHorizDist = horiz;
       }
     }
-    if (nearestEnemy) {
-      this.lastOpponentX = nearestEnemy.x;
-    }
+    this.nearestEnemyDist = bestHorizDist;
+    this.nearestAnyDist = bestAnyDist;
 
-    // Atualiza cooldowns e regeneração passiva de Ki
+    // Atualiza cooldowns, cadência global e regeneração passiva de Ki
+    this.globalAttackCooldown = Math.max(0, this.globalAttackCooldown - dt);
     this.cooldowns.ataque_1 = Math.max(0, this.cooldowns.ataque_1 - dt);
     this.cooldowns.ataque_2 = Math.max(0, this.cooldowns.ataque_2 - dt);
     this.cooldowns.ataque_3 = Math.max(0, this.cooldowns.ataque_3 - dt);
@@ -426,6 +465,40 @@ export class Fighter {
     this.auraFlashTime = Math.max(0, this.auraFlashTime - dt);
     this.dropThroughTimer = Math.max(0, this.dropThroughTimer - dt);
     this.ki = Math.min(this.maxKi, this.ki + dt * 4.2);
+
+    // Atualiza afterimages (rastros de movimento rápido / especial)
+    for (const img of this.afterimages) {
+      img.age += dt;
+    }
+    this.afterimages = this.afterimages.filter((img) => img.age < img.maxAge);
+    const shouldEmitTrail =
+      this.hp > 0 &&
+      (Math.abs(this.vx) > 295 ||
+        this.state === 'ataque_2' ||
+        this.state === 'ataque_4' ||
+        this.state === 'evolve');
+    if (shouldEmitTrail) {
+      this.afterimageTimer -= dt;
+      if (this.afterimageTimer <= 0) {
+        this.afterimageTimer = 0.042;
+        const curFrame = this.getCurrentFrame();
+        if (curFrame) {
+          this.afterimages.push({
+            frame: curFrame,
+            x: this.x,
+            y: this.y,
+            facing: this.facing,
+            age: 0,
+            maxAge: 0.16,
+          });
+          if (this.afterimages.length > 5) {
+            this.afterimages.shift();
+          }
+        }
+      }
+    } else {
+      this.afterimageTimer = 0;
+    }
 
     if (this.comboResetTimer > 0) {
       this.comboResetTimer -= dt;
@@ -440,22 +513,11 @@ export class Fighter {
         this.state = 'hitstun';
       }
     } else {
-      // Virada automática para o oponente mais próximo em poses neutras/defensivas
-      if (
-        this.grounded &&
-        nearestEnemy &&
-        (this.state === 'idle' ||
-          this.state === 'crouch' ||
-          this.state === 'block')
-      ) {
-        if (Math.abs(nearestEnemy.x - this.x) > 8) {
-          this.facing = nearestEnemy.x >= this.x ? 1 : -1;
-        }
-      }
-
-      // Máquina de estados
+      // Máquina de estados (facing 100% manual: sem virada magnética passiva)
       switch (this.state) {
         case 'evolve': {
+          this.vx *= Math.pow(0.02, dt);
+          if (Math.abs(this.vx) < 8) this.vx = 0;
           if (this.stateTime >= 0.58 && !this.evolvingPending) {
             this.state = this.grounded ? 'idle' : 'jump';
             this.stateTime = 0;
@@ -570,7 +632,7 @@ export class Fighter {
     this.x = Math.max(this.arenaLeft, Math.min(this.arenaRight, this.x));
   }
 
-  private updateNeutralState(_dt: number, input: FighterInputState): void {
+  private updateNeutralState(dt: number, input: FighterInputState): void {
     // Evolução manual se barra estiver cheia
     if (input.justEvolve && this.canEvolveNow()) {
       this.triggerEvolution();
@@ -599,13 +661,14 @@ export class Fighter {
       return;
     }
 
-    // Defesa (apenas no chão/plataforma)
+    // Defesa (apenas no chão/plataforma; permite trocar direção manualmente)
     if (this.grounded && input.block) {
-      if (Math.abs(this.lastOpponentX - this.x) > 8) {
-        this.facing = this.lastOpponentX >= this.x ? 1 : -1;
+      if (Math.abs(input.moveX) > 0.25) {
+        this.facing = input.moveX > 0 ? 1 : -1;
       }
       this.state = 'block';
-      this.vx *= 0.72;
+      this.vx *= Math.pow(0.002, dt);
+      if (Math.abs(this.vx) < 8) this.vx = 0;
       return;
     }
 
@@ -624,24 +687,27 @@ export class Fighter {
       return;
     }
 
-    // Agachar
+    // Agachar (facing 100% manual)
     if (this.grounded && input.down) {
       if (Math.abs(input.moveX) > 0.25) {
         this.facing = input.moveX > 0 ? 1 : -1;
-      } else if (Math.abs(this.lastOpponentX - this.x) > 8) {
-        this.facing = this.lastOpponentX >= this.x ? 1 : -1;
       }
       this.state = 'crouch';
-      this.vx *= 0.65;
+      this.vx *= Math.pow(0.001, dt);
+      if (Math.abs(this.vx) < 8) this.vx = 0;
       return;
     }
 
-    // Movimento horizontal / Corrida
+    // Movimento horizontal / Corrida / Controle aéreo com damping
     if (!this.grounded) {
       this.state = 'jump';
       const airSpeed = Fighter.BASE_SPEED * this.getPhaseSpeedMultiplier() * 0.92;
       if (Math.abs(input.moveX) > 0.2) {
-        this.vx += (input.moveX * airSpeed - this.vx) * 0.14;
+        this.facing = input.moveX > 0 ? 1 : -1;
+        this.vx += (input.moveX * airSpeed - this.vx) * Math.min(1, dt * 8.5);
+      } else {
+        this.vx *= Math.pow(0.18, dt);
+        if (Math.abs(this.vx) < 10) this.vx = 0;
       }
       return;
     }
@@ -655,11 +721,8 @@ export class Fighter {
         this.stateTime = 0;
       }
     } else {
-      this.vx *= 0.65;
+      this.vx *= Math.pow(0.0004, dt);
       if (Math.abs(this.vx) < 8) this.vx = 0;
-      if (Math.abs(this.lastOpponentX - this.x) > 8) {
-        this.facing = this.lastOpponentX >= this.x ? 1 : -1;
-      }
       if (this.state !== 'idle') {
         this.state = 'idle';
         this.stateTime = 0;
@@ -673,10 +736,14 @@ export class Fighter {
     );
     const progress = this.stateTime / spec.duration;
 
-    // Desaceleração durante o golpe
+    // Desaceleração durante o golpe + freio ao encostar no oponente (anti-ímã)
     this.vx *= Math.pow(0.03, dt);
+    const pushLimit = this.getPushRadius() * 2 + 8;
+    if (this.nearestEnemyDist <= pushLimit && this.vx * this.attackDirX > 0) {
+      this.vx = 0;
+    }
 
-    // Dispara Projétil (A3) OU VFX 2x2 acoplado/direcionado (A1/A2/A4), sem duplicação
+    // Dispara Projétil (A3) OU VFX acoplado/direcionado (A1/A2/A4), sem duplicação
     if (progress >= spec.activeStart) {
       if (spec.isProjectile) {
         if (!this.projectileSpawned) {
@@ -685,7 +752,10 @@ export class Fighter {
         }
       } else if (!this.vfxSpawned) {
         this.vfxSpawned = true;
-        const offsetDist = spec.action === 'ataque_4' ? 115 : 80;
+        const baseReach = spec.action === 'ataque_4' ? 112 : 82;
+        const offsetDist = Number.isFinite(this.nearestEnemyDist)
+          ? Math.max(58, Math.min(baseReach, this.nearestEnemyDist * 0.55))
+          : baseReach;
         const baseChestY =
           Math.abs(this.attackDirY) < 0.2 ? this.y + spec.offsetY : this.y - 96;
         const vfxX = this.x + this.attackDirX * offsetDist;
@@ -695,8 +765,9 @@ export class Fighter {
       }
     }
 
-    // Cancelamento de combo (A1 -> A2/A3/A4 no acerto!)
+    // Cancelamento de combo apenas no ritmo clássico (no ritmo tático vale o intervalo ~1s)
     if (
+      this.combatPace === 'classic' &&
       this.state === 'ataque_1' &&
       this.attackHitDone &&
       progress >= 0.48
@@ -715,6 +786,7 @@ export class Fighter {
   private resolveAttackDirection(input?: FighterInputState): {
     dirX: number;
     dirY: number;
+    hasHorizInput: boolean;
   } {
     const rawX = input ? input.moveX : 0;
     const rawY = input ? input.moveY : 0;
@@ -724,30 +796,35 @@ export class Fighter {
       Math.abs(rawY) > 0.28 ? rawY : input?.down ? 1 : input?.up ? -1 : 0;
 
     if (ax === 0 && ay === 0) {
-      if (Math.abs(this.lastOpponentX - this.x) > 8) {
-        this.facing = this.lastOpponentX >= this.x ? 1 : -1;
-      }
-      return { dirX: this.facing, dirY: 0 };
+      // Sem giro magnético: golpe sai para a direção atual do personagem
+      return { dirX: this.facing, dirY: 0, hasHorizInput: false };
     }
 
     if (ax === 0) {
-      return { dirX: 0, dirY: ay < 0 ? -1 : 1 };
+      return { dirX: 0, dirY: ay < 0 ? -1 : 1, hasHorizInput: false };
     }
 
     this.facing = ax >= 0 ? 1 : -1;
     if (ay === 0) {
-      return { dirX: this.facing, dirY: 0 };
+      return { dirX: this.facing, dirY: 0, hasHorizInput: true };
     }
 
     const len = Math.hypot(ax, ay) || 1;
-    return { dirX: ax / len, dirY: ay / len };
+    return { dirX: ax / len, dirY: ay / len, hasHorizInput: true };
   }
 
   private applyAttackLunge(
     action: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4',
     spec: AttackSpec
   ): void {
-    this.vx = this.attackDirX * spec.lungeX;
+    const pushLimit = this.getPushRadius() * 2 + 8;
+    if (this.hasMoveInputInAttack && this.nearestEnemyDist > pushLimit) {
+      this.vx = this.attackDirX * spec.lungeX;
+    } else {
+      this.vx *= 0.25;
+      if (Math.abs(this.vx) < 8) this.vx = 0;
+    }
+
     if (this.attackDirY < -0.32) {
       if (action === 'ataque_2' || action === 'ataque_4') {
         this.vy = Math.min(
@@ -788,6 +865,26 @@ export class Fighter {
   ): void {
     this.ki = isRemote ? Math.max(0, this.ki - spec.kiCost) : this.ki - spec.kiCost;
     this.cooldowns[action] = spec.cooldown;
+
+    // Intervalo global tático (~1s início-a-início) antes de qualquer próximo ataque
+    const postDelayMap: Record<CombatPace, Record<typeof action, number>> = {
+      tactical: {
+        ataque_1: 0.58,
+        ataque_2: 0.65,
+        ataque_3: 0.72,
+        ataque_4: 0.90,
+      },
+      classic: {
+        ataque_1: 0.14,
+        ataque_2: 0.18,
+        ataque_3: 0.22,
+        ataque_4: 0.30,
+      },
+    };
+    const totalCadence = spec.duration + postDelayMap[this.combatPace][action];
+    this.globalAttackMax = totalCadence;
+    this.globalAttackCooldown = totalCadence;
+
     this.state = action;
     this.stateTime = 0;
     this.attackHitDone = false;
@@ -815,13 +912,18 @@ export class Fighter {
   ): boolean {
     if (this.hp <= 0) return false;
     const spec = this.getAttackSpec(action);
-    if (this.cooldowns[action] > 0 || this.ki < spec.kiCost) {
+    if (
+      this.globalAttackCooldown > 0 ||
+      this.cooldowns[action] > 0 ||
+      this.ki < spec.kiCost
+    ) {
       return false;
     }
 
-    const { dirX, dirY } = this.resolveAttackDirection(input);
+    const { dirX, dirY, hasHorizInput } = this.resolveAttackDirection(input);
     this.attackDirX = dirX;
     this.attackDirY = dirY;
+    this.hasMoveInputInAttack = hasHorizInput;
     this.beginAttackState(action, spec, false);
     return true;
   }
@@ -843,6 +945,7 @@ export class Fighter {
       this.attackDirX = this.facing;
       this.attackDirY = 0;
     }
+    this.hasMoveInputInAttack = Math.abs(this.attackDirX) > 0.25 && spec.lungeX > 0;
     this.beginAttackState(action, spec, true);
   }
 
@@ -1041,22 +1144,32 @@ export class Fighter {
 
     let idx = 0;
     if (this.state === 'idle') {
-      idx = Math.floor(this.stateTime * 6.5) % frames.length;
+      const fps = frames.length >= 6 ? 8 : 6.5;
+      idx = Math.floor(this.stateTime * fps) % frames.length;
     } else if (this.state === 'run') {
-      idx = Math.floor(this.stateTime * 11) % frames.length;
+      const fps = frames.length >= 6 ? 13 : 11;
+      idx = Math.floor(this.stateTime * fps) % frames.length;
     } else if (this.state === 'jump') {
-      if (this.grounded && this.landingTimer > 0) idx = Math.min(frames.length - 1, 3);
-      else if (this.stateTime < 0.09) idx = 0;
-      else if (this.vy < -60) idx = Math.min(frames.length - 1, 1);
-      else idx = Math.min(frames.length - 1, 2);
+      if (this.grounded && this.landingTimer > 0) {
+        idx = frames.length - 1;
+      } else if (this.stateTime < 0.08) {
+        idx = 0;
+      } else if (this.vy < -60) {
+        idx = Math.min(frames.length - 1, Math.max(1, Math.round((frames.length - 1) * 0.35)));
+      } else {
+        idx = Math.min(frames.length - 1, Math.max(1, Math.round((frames.length - 1) * 0.68)));
+      }
     } else if (this.state === 'crouch') {
-      // Segura na pose agachada mais baixa (f2) sem voltar a ficar em pé nos frames 3..4
-      idx = this.stateTime < 0.08 ? 0 : Math.min(1, frames.length - 1);
+      // Segura na pose agachada mais baixa sem voltar a ficar em pé nos frames finais
+      const holdIdx = frames.length >= 6 ? 2 : 1;
+      idx = this.stateTime < 0.07 ? 0 : Math.min(holdIdx, frames.length - 1);
     } else if (this.state === 'block') {
       if (this.blockImpactTimer > 0) {
-        idx = Math.min(2, frames.length - 1);
+        const impactIdx = frames.length >= 6 ? 3 : 2;
+        idx = Math.min(impactIdx, frames.length - 1);
       } else {
-        idx = this.stateTime < 0.07 ? 0 : Math.min(1, frames.length - 1);
+        const guardIdx = frames.length >= 6 ? 2 : 1;
+        idx = this.stateTime < 0.07 ? 0 : Math.min(guardIdx, frames.length - 1);
       }
     } else if (this.state === 'hitstun') {
       const totalStun = Math.max(
@@ -1064,12 +1177,10 @@ export class Fighter {
         this.stateTime + Math.max(0, this.hitstunRemaining)
       );
       const p = Math.min(0.999, this.stateTime / totalStun);
-      if (p < 0.25) idx = 0;
-      else if (p < 0.55) idx = Math.min(1, frames.length - 1);
-      else if (p < 0.80) idx = Math.min(2, frames.length - 1);
-      else idx = Math.min(3, frames.length - 1);
+      idx = Math.min(frames.length - 1, Math.floor(p * frames.length));
     } else if (this.state === 'evolve') {
-      idx = Math.floor(this.stateTime * 10) % frames.length;
+      const fps = frames.length >= 6 ? 12 : 10;
+      idx = Math.floor(this.stateTime * fps) % frames.length;
     } else {
       const spec = this.getAttackSpec(this.state);
       const progress = Math.min(0.999, this.stateTime / spec.duration);
@@ -1077,6 +1188,40 @@ export class Fighter {
     }
 
     return frames[idx];
+  }
+
+  public renderAura(ctx: CanvasRenderingContext2D): void {
+    if (
+      this.hp > 0 &&
+      (this.phase >= 2 || this.auraFlashTime > 0 || this.state === 'ataque_4')
+    ) {
+      const auraColor = this.phasePack.manifest.auraColor || '#38bdf8';
+      const pulse = 0.88 + 0.14 * Math.sin(performance.now() * 0.012);
+      const baseAlpha =
+        this.auraFlashTime > 0 ? 0.55 : 0.18 + (this.phase - 1) * 0.08;
+      const proximityDim =
+        this.nearestAnyDist < 120
+          ? 0.35 + 0.65 * Math.max(0, (this.nearestAnyDist - 55) / 65)
+          : 1;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = baseAlpha * proximityDim;
+      const grad = ctx.createRadialGradient(
+        this.x,
+        this.y - 95,
+        12,
+        this.x,
+        this.y - 95,
+        92 * pulse
+      );
+      grad.addColorStop(0, auraColor);
+      grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y - 95, 92 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
   public render(
@@ -1098,6 +1243,13 @@ export class Fighter {
     if (this.state === 'crouch' && frame.meta.rawH >= refHeight * 0.90) {
       renderScaleX = scale * 1.04;
       renderScaleY = scale * 0.86;
+    } else if (!this.grounded && this.vy < -320) {
+      renderScaleX = scale * 0.95;
+      renderScaleY = scale * 1.06;
+    } else if (this.landingTimer > 0) {
+      const landRatio = this.landingTimer / 0.09;
+      renderScaleX = scale * (1 + 0.06 * landRatio);
+      renderScaleY = scale * (1 - 0.05 * landRatio);
     }
 
     // Sombra na superfície imediatamente abaixo (plataforma ou chão)
@@ -1131,32 +1283,25 @@ export class Fighter {
     ctx.fill();
     ctx.restore();
 
-    // Aura de Fase (mais intensa nas fases 2..4 ou durante evolve/ultimate)
-    if (
-      this.hp > 0 &&
-      (this.phase >= 2 || this.auraFlashTime > 0 || this.state === 'ataque_4')
-    ) {
-      const auraColor = this.phasePack.manifest.auraColor || '#38bdf8';
-      const pulse = 0.88 + 0.14 * Math.sin(performance.now() * 0.012);
-      const auraAlpha = this.auraFlashTime > 0 ? 0.55 : 0.18 + (this.phase - 1) * 0.08;
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = auraAlpha;
-      const grad = ctx.createRadialGradient(
-        this.x,
-        this.y - 95,
-        12,
-        this.x,
-        this.y - 95,
-        92 * pulse
-      );
-      grad.addColorStop(0, auraColor);
-      grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(this.x, this.y - 95, 92 * pulse, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+    // Afterimages sutis atrás do lutador em movimento rápido / ataque
+    if (this.hp > 0 && this.afterimages.length > 0) {
+      for (const trail of this.afterimages) {
+        const lifeRatio = Math.max(0, 1 - trail.age / trail.maxAge);
+        if (lifeRatio <= 0.02) continue;
+        ctx.save();
+        ctx.translate(trail.x, trail.y);
+        ctx.scale(trail.facing * scale, scale);
+        ctx.globalAlpha = lifeRatio * 0.24;
+        ctx.filter = 'saturate(1.6) brightness(1.15)';
+        ctx.drawImage(
+          trail.frame.image,
+          -trail.frame.meta.anchorX,
+          -trail.frame.meta.anchorY,
+          trail.frame.meta.w,
+          trail.frame.meta.h
+        );
+        ctx.restore();
+      }
     }
 
     // Desenho do sprite ancorado nos pés com suporte a flipX (facing = -1)

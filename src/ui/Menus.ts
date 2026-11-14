@@ -1,4 +1,10 @@
 import { AudioManager } from '../engine/AudioManager';
+import {
+  BINDABLE_ACTION_LABELS,
+  InputManager,
+  formatGamepadButton,
+  formatKeyCode,
+} from '../engine/InputManager';
 import { CharactersManifest } from '../engine/SpriteLoader';
 import { AIDifficulty } from '../game/AIController';
 import { ARENA_THEMES, getArenaThemeInfo } from '../game/ArenaMap';
@@ -14,7 +20,16 @@ import {
   teamForSlot,
 } from '../net/NetworkClient';
 import { PwaManager } from '../pwa/PwaManager';
-import { SaveManager, xpRequiredForLevel } from '../storage/SaveManager';
+import {
+  BindableAction,
+  CombatPace,
+  GamepadBindings,
+  KeyBindings,
+  SaveManager,
+  createDefaultGamepadBindings,
+  createDefaultKeyBindings,
+  xpRequiredForLevel,
+} from '../storage/SaveManager';
 
 type ScreenName = 'title' | 'select' | 'rooms' | 'lobby' | 'loading' | 'none';
 
@@ -50,14 +65,21 @@ export class Menus {
   private readonly pwa: PwaManager;
   private readonly audio: AudioManager;
   private readonly net: NetworkClient;
+  private readonly input: InputManager;
   private readonly callbacks: MenusCallbacks;
 
   private currentScreen: ScreenName = 'title';
   private activeMatchMode: 'solo' | 'room-bot' | 'online' = 'solo';
   private showSettingsModal = false;
+  private showHelpModal = false;
   private showPauseModal = false;
   private showAuthModal = false;
   private showFriendsModal = false;
+  private helpTab: 'keyboard' | 'gamepad' | 'touch' | 'combat' = 'keyboard';
+  private capturingAction: {
+    device: 'keyboard' | 'gamepad';
+    action: BindableAction;
+  } | null = null;
 
   private lastResult: {
     report: MatchEndReport;
@@ -104,6 +126,7 @@ export class Menus {
     pwa: PwaManager,
     audio: AudioManager,
     net: NetworkClient,
+    input: InputManager,
     callbacks: MenusCallbacks
   ) {
     const el = document.getElementById('ui-layer');
@@ -114,6 +137,7 @@ export class Menus {
     this.pwa = pwa;
     this.audio = audio;
     this.net = net;
+    this.input = input;
     this.callbacks = callbacks;
 
     const ids = Object.keys(manifest.characters);
@@ -292,9 +316,11 @@ export class Menus {
   }
 
   public hideAll(): void {
+    this.cancelCapture();
     this.currentScreen = 'none';
     this.showPauseModal = false;
     this.showSettingsModal = false;
+    this.showHelpModal = false;
     this.showAuthModal = false;
     this.showFriendsModal = false;
     this.lastResult = null;
@@ -307,8 +333,43 @@ export class Menus {
   }
 
   public closePause(): void {
+    this.cancelCapture();
     this.showPauseModal = false;
+    this.showHelpModal = false;
+    this.showSettingsModal = false;
     this.render();
+  }
+
+  public openHelp(tab?: 'keyboard' | 'gamepad' | 'touch' | 'combat'): void {
+    this.cancelCapture();
+    if (tab) this.helpTab = tab;
+    this.showHelpModal = true;
+    this.render();
+  }
+
+  public isModalOpen(): boolean {
+    return (
+      this.showPauseModal ||
+      this.showSettingsModal ||
+      this.showHelpModal ||
+      this.showAuthModal ||
+      this.showFriendsModal ||
+      this.lastResult !== null
+    );
+  }
+
+  public refreshGamepadStatus(): void {
+    if (
+      (this.showHelpModal || this.showSettingsModal || this.currentScreen === 'title') &&
+      !this.isTypingInInput()
+    ) {
+      this.render();
+    }
+  }
+
+  private cancelCapture(): void {
+    this.capturingAction = null;
+    this.input.cancelCapture();
   }
 
   public showMatchResult(
@@ -328,7 +389,8 @@ export class Menus {
     const prog = this.save.getCharacterProgress(this.selectedP1);
     const maxAllowedPhase = Math.min(4, Math.max(1, prog.unlockedPhase));
     const startPhase = Math.min(this.selectedStartPhase, maxAllowedPhase);
-    const difficulty = this.save.getData().settings.difficulty;
+    const settings = this.save.getData().settings;
+    const difficulty = settings.difficulty;
 
     const p2StartPhase =
       difficulty === 'master' ? Math.min(4, startPhase + 1) : startPhase;
@@ -340,6 +402,7 @@ export class Menus {
       p2StartPhase,
       p1Level: prog.level,
       difficulty,
+      combatPace: settings.combatPace,
       mode: 'solo',
       localSlot: 'p1',
       mapTheme: this.selectedMapTheme,
@@ -369,6 +432,7 @@ export class Menus {
       this.currentScreen !== 'none' ||
       this.showPauseModal ||
       this.showSettingsModal ||
+      this.showHelpModal ||
       this.showAuthModal ||
       this.showFriendsModal ||
       this.lastResult !== null;
@@ -411,6 +475,10 @@ export class Menus {
 
     if (this.showSettingsModal) {
       html += this.renderSettingsModal();
+    }
+
+    if (this.showHelpModal) {
+      html += this.renderHelpModal();
     }
 
     if (this.pendingInvites.length > 0 && this.currentScreen !== 'none') {
@@ -489,12 +557,23 @@ export class Menus {
         : 'PWA Instalável · Pronto Offline'
       : 'Modo Offline Ativo';
     const pendingCount = this.net.getFriendsOverview().incomingRequests.length;
+    const s = this.save.getData().settings;
+    const kb = s.keyBindings;
+    const gp = this.input.getConnectedGamepad();
+    const kLbl = (act: BindableAction) => escapeHtml(formatKeyCode(kb[act]?.[0]));
 
     return `
       <div class="ak-screen">
         ${this.renderProfileBar()}
         <div class="ak-panel ak-title-hero">
-          <span class="ak-badge">${onlineBadge}</span>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;align-items:center;">
+            <span class="ak-badge">${onlineBadge}</span>
+            ${
+              gp.connected
+                ? `<span class="ak-gamepad-pill connected">🎮 Controle: ${escapeHtml(gp.name.slice(0, 28))}</span>`
+                : ''
+            }
+          </div>
           <h1 class="ak-logo">AnimeKombat</h1>
           <p class="ak-subtitle">
             Luta 2D estilo anime com sistema de evolução em 4 fases. Jogue offline contra a CPU ou desafie amigos em salas online!
@@ -508,6 +587,9 @@ export class Menus {
             </button>
             <button id="btn-open-friends" class="ak-btn ak-btn-ghost" type="button">
               Amigos & Desafios ${pendingCount > 0 ? `<span class="ak-count-badge">${pendingCount}</span>` : ''}
+            </button>
+            <button id="btn-open-help" class="ak-btn ak-btn-ghost" type="button">
+              Ajuda & Controles
             </button>
             <button id="btn-open-settings" class="ak-btn ak-btn-ghost" type="button">
               Configurações
@@ -528,7 +610,7 @@ export class Menus {
               : ''
           }
           <p class="ak-subtitle" style="font-size:0.76rem; margin-top:4px;">
-            Desktop: WASD/Setas + J (A1), K (A2), L (A3), U (ULT), I (Defesa), Espaço (Pulo), E (Evoluir)
+            Teclado: ${kLbl('left')}/${kLbl('right')}/${kLbl('up')}/${kLbl('down')} + ${kLbl('a1')} (A1), ${kLbl('a2')} (A2), ${kLbl('a3')} (A3), ${kLbl('a4')} (ULT), ${kLbl('block')} (Defesa), ${kLbl('jump')} (Pulo), ${kLbl('evolve')} (Evoluir) · Controle USB/BT compatível
           </p>
         </div>
       </div>
@@ -1560,7 +1642,7 @@ export class Menus {
         <div class="ak-panel" style="max-width:460px;margin:auto;text-align:center;">
           <h2 style="margin:0 0 8px 0;">Carregando Arena & Sprites...</h2>
           <p class="ak-subtitle" style="margin-bottom:14px;">
-            Preparando folhas 2×2 e efeitos VFX para combate a 60 FPS.
+            Preparando sprites e efeitos VFX para combate a 60 FPS.
           </p>
           <div class="ak-progress-track">
             <div class="ak-progress-fill" style="width:${this.loadingPercent}%"></div>
@@ -1591,6 +1673,9 @@ export class Menus {
                 </button>`
               : ''
           }
+          <button id="btn-open-help" class="ak-btn ak-btn-ghost" type="button">
+            Ajuda & Controles (Remapear)
+          </button>
           <button id="btn-open-settings" class="ak-btn ak-btn-ghost" type="button">
             Configurações de Controle & Áudio
           </button>
@@ -1695,11 +1780,30 @@ export class Menus {
         <div class="ak-modal">
           <div class="ak-select-header">
             <h2 style="margin:0;">Configurações</h2>
-            <button id="btn-close-settings" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-              Fechar
-            </button>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <button id="btn-open-help" class="ak-btn ak-btn-cyan ak-btn-sm" type="button">
+                Teclas & Controle
+              </button>
+              <button id="btn-close-settings" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                Fechar
+              </button>
+            </div>
           </div>
 
+          <div class="ak-setting-row">
+            <div>
+              <div>Ritmo de Combate</div>
+              <div style="font-size:0.72rem;color:#94a3b8;">Tático (~1s entre golpes) ou Clássico (combos rápidos)</div>
+            </div>
+            <div class="ak-seg-group">
+              <button type="button" class="ak-seg-btn ak-seg-sm ${s.combatPace === 'tactical' ? 'active' : ''}" data-pace="tactical">
+                Tático (~1s)
+              </button>
+              <button type="button" class="ak-seg-btn ak-seg-sm ${s.combatPace === 'classic' ? 'active' : ''}" data-pace="classic">
+                Clássico
+              </button>
+            </div>
+          </div>
           <div class="ak-setting-row">
             <span>Opacidade Controles (${Math.round(s.controlsOpacity * 100)}%)</span>
             <input id="set-opacity" type="range" min="0.35" max="1" step="0.05" value="${s.controlsOpacity}" />
@@ -1709,8 +1813,12 @@ export class Menus {
             <input id="set-scale" type="range" min="0.8" max="1.2" step="0.05" value="${s.controlsScale}" />
           </div>
           <div class="ak-setting-row">
-            <span>Zona Morta Joystick (${Math.round(s.stickDeadzone * 100)}%)</span>
+            <span>Zona Morta Joystick Touch (${Math.round(s.stickDeadzone * 100)}%)</span>
             <input id="set-deadzone" type="range" min="0.1" max="0.4" step="0.02" value="${s.stickDeadzone}" />
+          </div>
+          <div class="ak-setting-row">
+            <span>Zona Morta Controle Físico (<span id="set-gp-deadzone-val">${Math.round(s.gamepadDeadzone * 100)}%</span>)</span>
+            <input id="set-gp-deadzone" type="range" min="0.14" max="0.40" step="0.02" value="${s.gamepadDeadzone}" />
           </div>
           <div class="ak-setting-row">
             <span>Pulo no Direcional (Cima)</span>
@@ -1742,6 +1850,236 @@ export class Menus {
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private remapKeyboardAction(action: BindableAction, code: string): void {
+    const cur = this.save.getData().settings.keyBindings;
+    const next: KeyBindings = { ...cur };
+    for (const k of Object.keys(next) as BindableAction[]) {
+      next[k] = (next[k] ?? []).filter((c) => c !== code);
+    }
+    next[action] = [code];
+    this.save.updateSettings({ keyBindings: next });
+    this.callbacks.onSettingsChanged();
+    this.showToast(
+      `${BINDABLE_ACTION_LABELS[action]} definido para ${formatKeyCode(code)}`
+    );
+  }
+
+  private remapGamepadAction(action: BindableAction, btnIndex: number): void {
+    const cur = this.save.getData().settings.gamepadBindings;
+    const next: GamepadBindings = { ...cur };
+    for (const k of Object.keys(next) as BindableAction[]) {
+      next[k] = (next[k] ?? []).filter((b) => b !== btnIndex);
+    }
+    next[action] = [btnIndex];
+    this.save.updateSettings({ gamepadBindings: next });
+    this.callbacks.onSettingsChanged();
+    this.showToast(
+      `${BINDABLE_ACTION_LABELS[action]} definido para ${formatGamepadButton(btnIndex)}`
+    );
+  }
+
+  private renderHelpModal(): string {
+    const s = this.save.getData().settings;
+    const gp = this.input.getConnectedGamepad();
+
+    const kbActions: BindableAction[] = [
+      'left',
+      'right',
+      'up',
+      'down',
+      'jump',
+      'a1',
+      'a2',
+      'a3',
+      'a4',
+      'block',
+      'evolve',
+      'pause',
+    ];
+    const gpActions: BindableAction[] = [
+      'a1',
+      'a2',
+      'a3',
+      'a4',
+      'jump',
+      'block',
+      'evolve',
+      'pause',
+    ];
+
+    let bodyHtml = '';
+    if (this.helpTab === 'keyboard') {
+      const rows = kbActions
+        .map((act) => {
+          const keys = s.keyBindings[act] ?? [];
+          const keysLabel =
+            keys.length > 0
+              ? keys.map((k) => formatKeyCode(k)).join(' / ')
+              : 'Não mapeado';
+          const isCap =
+            this.capturingAction?.device === 'keyboard' &&
+            this.capturingAction.action === act;
+          return `
+            <div class="ak-remap-row">
+              <span class="ak-remap-action">${escapeHtml(BINDABLE_ACTION_LABELS[act])}</span>
+              <span class="ak-remap-keys">${escapeHtml(keysLabel)}</span>
+              <button
+                type="button"
+                class="ak-btn ak-btn-sm ${isCap ? 'ak-btn-accent ak-capturing' : 'ak-btn-ghost'}"
+                data-remap-kb="${act}"
+              >
+                ${isCap ? 'Aperte uma tecla... (ESC cancela)' : 'Alterar'}
+              </button>
+            </div>
+          `;
+        })
+        .join('');
+      bodyHtml = `
+        <div class="ak-help-note">
+          Clique em <strong>Alterar</strong> e pressione a nova tecla desejada. Teclas já usadas em outra ação são transferidas automaticamente.
+        </div>
+        <div class="ak-remap-list">${rows}</div>
+        <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+          <button id="btn-reset-kb" type="button" class="ak-btn ak-btn-ghost ak-btn-sm">
+            Restaurar Padrão do Teclado
+          </button>
+        </div>
+      `;
+    } else if (this.helpTab === 'gamepad') {
+      const rows = gpActions
+        .map((act) => {
+          const btns = s.gamepadBindings[act] ?? [];
+          const btnLabel =
+            btns.length > 0
+              ? btns.map((b) => formatGamepadButton(b)).join(' / ')
+              : 'Não mapeado';
+          const isCap =
+            this.capturingAction?.device === 'gamepad' &&
+            this.capturingAction.action === act;
+          return `
+            <div class="ak-remap-row">
+              <span class="ak-remap-action">${escapeHtml(BINDABLE_ACTION_LABELS[act])}</span>
+              <span class="ak-remap-keys">${escapeHtml(btnLabel)}</span>
+              <button
+                type="button"
+                class="ak-btn ak-btn-sm ${isCap ? 'ak-btn-accent ak-capturing' : 'ak-btn-ghost'}"
+                data-remap-gp="${act}"
+              >
+                ${isCap ? 'Aperte um botão no controle...' : 'Alterar'}
+              </button>
+            </div>
+          `;
+        })
+        .join('');
+      bodyHtml = `
+        <div class="ak-help-note">
+          Conecte um controle Xbox, PlayStation ou USB/Bluetooth compatível. Analógico Esquerdo e D-Pad controlam movimentação e mira.
+        </div>
+        <div class="ak-setting-row" style="margin-bottom:8px;">
+          <span>Zona Morta Anti-Drift (<strong id="set-gp-deadzone-val">${Math.round(s.gamepadDeadzone * 100)}%</strong>)</span>
+          <input id="set-gp-deadzone" type="range" min="0.14" max="0.40" step="0.02" value="${s.gamepadDeadzone}" />
+        </div>
+        <div class="ak-remap-list">
+          <div class="ak-remap-row is-readonly">
+            <span class="ak-remap-action">Movimento & Mira</span>
+            <span class="ak-remap-keys">Analógico Esq. / D-Pad</span>
+            <span class="ak-tag-pill">Fixo</span>
+          </div>
+          ${rows}
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+          <button id="btn-reset-gp" type="button" class="ak-btn ak-btn-ghost ak-btn-sm">
+            Restaurar Padrão do Controle
+          </button>
+        </div>
+      `;
+    } else if (this.helpTab === 'touch') {
+      bodyHtml = `
+        <div class="ak-help-grid">
+          <div class="ak-help-card">
+            <h4>Analógico Virtual (Esquerda)</h4>
+            <p>Arraste para correr para esquerda/direita, agachar para baixo ou apontar golpes especiais (cima, diagonal e baixo).</p>
+          </div>
+          <div class="ak-help-card">
+            <h4>Golpes & Ultimate (Direita)</h4>
+            <p><strong>A1</strong> (Básico), <strong>A2</strong> (Especial), <strong>A3</strong> (Projétil/Energia) e <strong>ULT</strong> (Ultimate). O brilho indica recarga global e Ki suficiente.</p>
+          </div>
+          <div class="ak-help-card">
+            <h4>Defesa, Pulo & Evolução</h4>
+            <p>Segure <strong>DEF</strong> para bloquear golpes frontais. <strong>PULO</strong> salta (ou desça de plataformas com Baixo + Pulo). Quando a barra roxa encher, toque em <strong>EVOLUIR</strong>.</p>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+          <button id="btn-help-to-settings" type="button" class="ak-btn ak-btn-cyan ak-btn-sm">
+            Ajustar Tamanho, Opacidade e Vibração
+          </button>
+        </div>
+      `;
+    } else {
+      bodyHtml = `
+        <div class="ak-help-grid">
+          <div class="ak-help-card">
+            <h4>Cadência Tática (~1s entre golpes)</h4>
+            <p>No modo <strong>Tático</strong>, cada ataque aplica um intervalo global equilibrado (~1,0s) para que você leia o cenário, defenda e responda estrategicamente em vez de esmagar botões.</p>
+          </div>
+          <div class="ak-help-card">
+            <h4>Controle 100% Manual (Sem Ímã)</h4>
+            <p>Seu personagem só anda e vira quando você comanda esquerda/direita. Defesa e golpes saem exatamente para a direção escolhida sem puxar contra o oponente.</p>
+          </div>
+          <div class="ak-help-card">
+            <h4>Golpes Direcionais & Plataformas</h4>
+            <p>Segure <strong>Cima</strong>, <strong>Diagonal</strong> ou <strong>Baixo</strong> ao pressionar A1–A4 para variar a trajetória. Para descer de plataformas elevadas, pressione <strong>Baixo + Pulo</strong>.</p>
+          </div>
+          <div class="ak-help-card">
+            <h4>Evolução de Fase (1 → 4)</h4>
+            <p>Cause ou receba dano para carregar a barra roxa de Evolução. Quando atingir 100%, pressione <strong>Evoluir</strong> para transformar e ganhar dano, velocidade e novos golpes!</p>
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="ak-modal-backdrop">
+        <div class="ak-modal ak-modal-wide">
+          <div class="ak-select-header">
+            <h2 style="margin:0;">Ajuda & Controles</h2>
+            <button id="btn-close-help" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+              Fechar
+            </button>
+          </div>
+
+          <div class="ak-gamepad-banner ${gp.connected ? 'connected' : ''}">
+            <span class="ak-gamepad-dot"></span>
+            <span>
+              ${
+                gp.connected
+                  ? `Controle conectado: <strong>${escapeHtml(gp.name)}</strong>`
+                  : 'Nenhum controle físico conectado — plugue via USB/Bluetooth e pressione qualquer botão para detectar'
+              }
+            </span>
+          </div>
+
+          <div class="ak-tabs">
+            <button type="button" class="ak-tab-btn ${this.helpTab === 'keyboard' ? 'active' : ''}" data-help-tab="keyboard">
+              Teclado
+            </button>
+            <button type="button" class="ak-tab-btn ${this.helpTab === 'gamepad' ? 'active' : ''}" data-help-tab="gamepad">
+              Controle
+            </button>
+            <button type="button" class="ak-tab-btn ${this.helpTab === 'touch' ? 'active' : ''}" data-help-tab="touch">
+              Touch Mobile
+            </button>
+            <button type="button" class="ak-tab-btn ${this.helpTab === 'combat' ? 'active' : ''}" data-help-tab="combat">
+              Guia de Combate
+            </button>
+          </div>
+
+          ${bodyHtml}
         </div>
       </div>
     `;
@@ -1821,12 +2159,28 @@ export class Menus {
       this.render();
     });
 
-    // Configurações & PWA
+    // Configurações, Ajuda & PWA
+    click('btn-open-help', () => {
+      this.openHelp();
+    });
+    click('btn-close-help', () => {
+      this.cancelCapture();
+      this.showHelpModal = false;
+      this.render();
+    });
+    click('btn-help-to-settings', () => {
+      this.cancelCapture();
+      this.showHelpModal = false;
+      this.showSettingsModal = true;
+      this.render();
+    });
     click('btn-open-settings', () => {
+      this.cancelCapture();
       this.showSettingsModal = true;
       this.render();
     });
     click('btn-close-settings', () => {
+      this.cancelCapture();
       this.showSettingsModal = false;
       this.render();
     });
@@ -2386,8 +2740,109 @@ export class Menus {
     bindRange('set-opacity', (v) => this.save.updateSettings({ controlsOpacity: v }));
     bindRange('set-scale', (v) => this.save.updateSettings({ controlsScale: v }));
     bindRange('set-deadzone', (v) => this.save.updateSettings({ stickDeadzone: v }));
+    bindRange('set-gp-deadzone', (v) => {
+      this.save.updateSettings({ gamepadDeadzone: v });
+      const valEl = this.uiLayer.querySelector('#set-gp-deadzone-val');
+      if (valEl) valEl.textContent = `${Math.round(v * 100)}%`;
+    });
     bindRange('set-bgm-vol', (v) => this.save.updateSettings({ bgmVolume: v }));
     bindRange('set-sfx-vol', (v) => this.save.updateSettings({ sfxVolume: v }));
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-pace]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        const pace = (el.dataset.pace as CombatPace) || 'tactical';
+        this.save.updateSettings({ combatPace: pace });
+        this.callbacks.onSettingsChanged();
+        this.render();
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-help-tab]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        this.cancelCapture();
+        this.helpTab =
+          (el.dataset.helpTab as 'keyboard' | 'gamepad' | 'touch' | 'combat') ||
+          'keyboard';
+        this.render();
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-remap-kb]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const action = el.dataset.remapKb as BindableAction;
+        if (!action) return;
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        if (
+          this.capturingAction?.device === 'keyboard' &&
+          this.capturingAction.action === action
+        ) {
+          this.cancelCapture();
+          this.render();
+          return;
+        }
+        this.cancelCapture();
+        this.capturingAction = { device: 'keyboard', action };
+        this.input.startKeyCapture((code) => {
+          this.capturingAction = null;
+          if (code) {
+            this.remapKeyboardAction(action, code);
+          }
+          this.render();
+        });
+        this.render();
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-remap-gp]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const action = el.dataset.remapGp as BindableAction;
+        if (!action) return;
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        if (
+          this.capturingAction?.device === 'gamepad' &&
+          this.capturingAction.action === action
+        ) {
+          this.cancelCapture();
+          this.render();
+          return;
+        }
+        this.cancelCapture();
+        this.capturingAction = { device: 'gamepad', action };
+        this.input.startGamepadCapture((btnIndex) => {
+          this.capturingAction = null;
+          if (btnIndex !== null) {
+            this.remapGamepadAction(action, btnIndex);
+          }
+          this.render();
+        });
+        this.render();
+      });
+    });
+
+    click('btn-reset-kb', () => {
+      this.cancelCapture();
+      this.save.updateSettings({ keyBindings: createDefaultKeyBindings() });
+      this.callbacks.onSettingsChanged();
+      this.showToast('Teclado restaurado para o padrão!');
+      this.render();
+    });
+
+    click('btn-reset-gp', () => {
+      this.cancelCapture();
+      this.save.updateSettings({
+        gamepadBindings: createDefaultGamepadBindings(),
+        gamepadDeadzone: 0.26,
+      });
+      this.callbacks.onSettingsChanged();
+      this.showToast('Controle restaurado para o padrão!');
+      this.render();
+    });
 
     click('set-jump-stick', () => {
       const cur = this.save.getData().settings.jumpViaStick;

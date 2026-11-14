@@ -33,6 +33,7 @@ export class AIController {
   private thinkTimer = 0;
   private blockTimer = 0;
   private moveDir = 0;
+  private blockFaceDir: 1 | -1 = 1;
   private wantJump = false;
   private wantDropDown = false;
   private queuedAttack: 'a1' | 'a2' | 'a3' | 'a4' | null = null;
@@ -115,11 +116,14 @@ export class AIController {
       target.state === 'ataque_4';
 
     const reactionInterval =
-      this.difficulty === 'easy' ? 0.38 : this.difficulty === 'medium' ? 0.2 : 0.1;
+      this.difficulty === 'easy' ? 0.50 : this.difficulty === 'medium' ? 0.30 : 0.18;
     const blockChance =
       this.difficulty === 'easy' ? 0.2 : this.difficulty === 'medium' ? 0.55 : 0.82;
     const aggression =
       this.difficulty === 'easy' ? 0.38 : this.difficulty === 'medium' ? 0.68 : 0.92;
+    const canAttackGlobal = self.globalAttackCooldown <= 0;
+    const faceDir: 1 | -1 = dx >= 0 ? 1 : -1;
+    const approachOrAlign = dist > 115 ? dirToTarget : self.facing === faceDir ? 0 : dirToTarget;
 
     if (this.thinkTimer <= 0) {
       this.thinkTimer = reactionInterval * (0.8 + Math.random() * 0.4);
@@ -139,16 +143,18 @@ export class AIController {
         Math.abs(dy) < 120 &&
         Math.random() < blockChance
       ) {
-        this.blockTimer = 0.26;
+        this.blockTimer = 0.28;
+        this.blockFaceDir = faceDir;
         this.moveDir = 0;
       } else if (
+        canAttackGlobal &&
         dy < -65 &&
         dy > -205 &&
         dist < 170 &&
         self.cooldowns.ataque_1 <= 0 &&
         Math.random() < 0.42 * aggression
       ) {
-        this.moveDir = dist < 60 ? 0 : dirToTarget;
+        this.moveDir = dist < 60 ? 0 : approachOrAlign;
         if (self.ki >= ATTACK_SPECS.ataque_2.kiCost && self.cooldowns.ataque_2 <= 0 && Math.random() < 0.5) {
           this.queueDirectionalAttack('a2', dx, dy);
         } else {
@@ -188,66 +194,72 @@ export class AIController {
         // Distância longa: aproxima ou dispara projétil A3 (horizontal ou diagonal/vertical)
         this.moveDir = dirToTarget;
         if (
+          canAttackGlobal &&
           withinVerticalAim &&
           self.ki >= ATTACK_SPECS.ataque_3.kiCost &&
           self.cooldowns.ataque_3 <= 0 &&
           Math.random() < 0.35 * aggression
         ) {
           this.queueDirectionalAttack('a3', dx, dy);
-          if (Math.abs(this.aimY) < 0.3) this.moveDir = 0;
+          if (Math.abs(this.aimY) < 0.3) this.moveDir = self.facing === faceDir ? 0 : dirToTarget;
         } else if (Math.random() < 0.14) {
           this.wantJump = true;
         }
       } else if (dist > 145) {
         // Distância média: investida A2, Ultimate A4 ou aproximação
         if (
+          canAttackGlobal &&
           withinVerticalAim &&
           self.ki >= ATTACK_SPECS.ataque_4.kiCost &&
           self.cooldowns.ataque_4 <= 0 &&
           Math.random() < 0.42 * aggression
         ) {
-          this.moveDir = dirToTarget;
+          this.moveDir = approachOrAlign;
           this.queueDirectionalAttack('a4', dx, dy);
         } else if (
+          canAttackGlobal &&
           withinVerticalAim &&
           self.ki >= ATTACK_SPECS.ataque_2.kiCost &&
           self.cooldowns.ataque_2 <= 0 &&
           Math.random() < 0.52 * aggression
         ) {
-          this.moveDir = dirToTarget;
+          this.moveDir = approachOrAlign;
           this.queueDirectionalAttack('a2', dx, dy);
         } else {
           this.moveDir = dirToTarget;
         }
       } else {
-        // Curta distância: combo A1 -> A2 / A4 ou recuo tático
+        // Curta distância: respeita espaçamento limpo, ritmo global ou recuo tático
         if (
+          canAttackGlobal &&
           withinVerticalAim &&
           self.ki >= ATTACK_SPECS.ataque_4.kiCost &&
           self.cooldowns.ataque_4 <= 0 &&
           Math.random() < 0.35 * aggression
         ) {
-          this.moveDir = dirToTarget;
+          this.moveDir = approachOrAlign;
           this.queueDirectionalAttack('a4', dx, dy);
         } else if (
+          self.combatPace === 'classic' &&
           self.state === 'ataque_1' &&
           self.attackHitDone &&
           self.ki >= ATTACK_SPECS.ataque_2.kiCost &&
           Math.random() < 0.7 * aggression
         ) {
-          this.moveDir = dirToTarget;
+          this.moveDir = approachOrAlign;
           this.queueDirectionalAttack('a2', dx, dy);
         } else if (
+          canAttackGlobal &&
           withinVerticalAim &&
           self.cooldowns.ataque_1 <= 0 &&
           Math.random() < 0.78 * aggression
         ) {
-          this.moveDir = dirToTarget;
+          this.moveDir = approachOrAlign;
           this.queueDirectionalAttack('a1', dx, dy);
-        } else if (Math.random() < 0.22) {
+        } else if (dist < 108 || Math.random() < 0.22) {
           this.moveDir = -dirToTarget;
         } else {
-          this.moveDir = 0;
+          this.moveDir = self.facing === faceDir ? 0 : dirToTarget;
         }
       }
     }
@@ -270,12 +282,13 @@ export class AIController {
     this.wantEvolve = false;
 
     const moveY = down ? 1 : attackAimY;
+    const effectiveMoveX = blocking ? this.blockFaceDir * 0.3 : this.moveDir;
 
     return {
-      moveX: blocking ? 0 : this.moveDir,
+      moveX: effectiveMoveX,
       moveY,
-      left: !blocking && this.moveDir < -0.2,
-      right: !blocking && this.moveDir > 0.2,
+      left: (!blocking && this.moveDir < -0.2) || (blocking && this.blockFaceDir < 0),
+      right: (!blocking && this.moveDir > 0.2) || (blocking && this.blockFaceDir > 0),
       up: moveY < -0.45 || (jump && !down),
       down: down || moveY > 0.45,
       a1,

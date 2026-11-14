@@ -6,11 +6,12 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import zipfile
 from collections import deque
 from pathlib import Path
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "public" / "assets" / "characters"
@@ -96,15 +97,38 @@ def prettify_slug(slug: str) -> str:
     return " ".join(w.capitalize() for w in words)
 
 
+LAYOUT_TAG_RE = re.compile(
+    r"(?:(?:_|-)(?:3x2|6frames|2x2|2x1|2frames|extra|add2))+$"
+)
+
+EXTRA_INTERLEAVE_ORDER = {
+    "crouch": ["F1", "E1", "F2", "E2", "F3", "F4"],
+    "block": ["F1", "E1", "F2", "E2", "F3", "F4"],
+    "default": ["F1", "E1", "F2", "F3", "E2", "F4"],
+}
+
+
+def detect_sheet_layout(stem: str) -> tuple[str, int, int, bool]:
+    """Infere o layout do grid (cols, rows) e se é uma tira extra +2 frames."""
+    m = LAYOUT_TAG_RE.search(stem.lower())
+    suffix = m.group(0) if m else ""
+    if "3x2" in suffix or "6frames" in suffix:
+        return "3x2", 3, 2, False
+    if any(tok in suffix for tok in ("2x1", "2frames", "extra", "add2")):
+        return "2x1", 2, 1, True
+    return "2x2", 2, 2, False
+
+
 def extract_move_label(stem: str, canonical: str) -> str:
-    cleaned = re.sub(r"^(?:vfx_)?(?:ataque|atk)_[1-4]_?", "", stem)
+    clean_stem = LAYOUT_TAG_RE.sub("", stem.lower())
+    cleaned = re.sub(r"^(?:vfx_)?(?:ataque|atk)_[1-4]_?", "", clean_stem)
     if not cleaned:
         num = canonical.split("_")[-1]
         return f"Golpe {num}"
     return prettify_slug(cleaned)
 
 
-def parse_entry(zip_path: Path, internal_path: str, folder_char: str):
+def parse_entry(source_path: Path, internal_path: str, folder_char: str, is_loose: bool = False):
     parts = [p for p in internal_path.replace("\\", "/").split("/") if p]
     if len(parts) < 2:
         return None
@@ -112,8 +136,14 @@ def parse_entry(zip_path: Path, internal_path: str, folder_char: str):
     if not filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
         return None
 
-    stem = Path(filename).stem.lower()
-    is_vfx = "vfx" in zip_path.stem.lower() or any("vfx" in p.lower() for p in parts[:-1]) or stem.startswith("vfx_")
+    stem_raw = Path(filename).stem.lower()
+    layout_name, cols, rows, is_extra = detect_sheet_layout(stem_raw)
+    stem = LAYOUT_TAG_RE.sub("", stem_raw)
+    is_vfx = (
+        "vfx" in source_path.stem.lower()
+        or any("vfx" in p.lower() for p in parts[:-1])
+        or stem.startswith("vfx_")
+    )
 
     phase_folder = None
     for part in parts[:-1]:
@@ -123,11 +153,11 @@ def parse_entry(zip_path: Path, internal_path: str, folder_char: str):
     if not phase_folder:
         return None
 
-    m_phase = re.match(r"^fase_([1-4])_(.+)$", phase_folder)
+    m_phase = re.match(r"^fase_([1-4])(?:_(.+))?$", phase_folder)
     if not m_phase:
         return None
     phase_num = int(m_phase.group(1))
-    phase_slug = m_phase.group(2)
+    phase_slug = m_phase.group(2) or f"fase_{phase_num}"
 
     canonical = None
     patterns = VFX_MAP_PATTERNS if is_vfx else ACTION_MAP_PATTERNS
@@ -139,7 +169,7 @@ def parse_entry(zip_path: Path, internal_path: str, folder_char: str):
         return None
 
     char_id_lower = folder_char.lower()
-    move_label = extract_move_label(stem, canonical) if ("ataque" in canonical) else canonical
+    move_label = extract_move_label(stem_raw, canonical) if ("ataque" in canonical) else canonical
     if "ataque" in canonical and not is_vfx:
         override = MOVE_NAME_OVERRIDES.get((char_id_lower, phase_num, canonical))
         if override and move_label.startswith("Golpe "):
@@ -154,8 +184,13 @@ def parse_entry(zip_path: Path, internal_path: str, folder_char: str):
         "is_vfx": is_vfx,
         "action": canonical,
         "move_label": move_label,
-        "zip_path": str(zip_path),
+        "zip_path": str(source_path),
         "internal_path": internal_path,
+        "is_loose": is_loose,
+        "layout": layout_name,
+        "cols": cols,
+        "rows": rows,
+        "is_extra": is_extra,
     }
 
 
@@ -236,27 +271,119 @@ def _strip_anomalous_vfx_bg(rgba: Image.Image) -> Image.Image:
     return Image.frombytes("RGBA", (w, h), bytes(buf))
 
 
-def _clear_safety_border(rgba: Image.Image, margin: int = 2) -> Image.Image:
-    """Zera margem de 2px nas bordas do quadrante para remover linhas divisórias do grid 2x2."""
+def _clear_safety_border(rgba: Image.Image, margin: int = 1) -> Image.Image:
+    """Zera margem mínima nas bordas do quadrante para remover linhas divisórias finas do grid."""
     w, h = rgba.size
-    if w <= margin * 2 or h <= margin * 2:
+    if margin <= 0 or w <= margin * 2 or h <= margin * 2:
         return rgba
     buf = bytearray(rgba.tobytes())
     for y in range(h):
+        row_start = y * w * 4
         if y < margin or y >= h - margin:
-            row_start = y * w * 4
             for x in range(w):
                 buf[row_start + x * 4 + 3] = 0
         else:
-            row_start = y * w * 4
             for x in range(margin):
                 buf[row_start + x * 4 + 3] = 0
                 buf[row_start + (w - 1 - x) * 4 + 3] = 0
     return Image.frombytes("RGBA", (w, h), bytes(buf))
 
 
-def _remove_bleed_islands(rgba: Image.Image, quad_idx: int) -> Image.Image:
-    """Remove ilhas desconectadas nas divisórias de corte (vazamento entre frames 2x2)."""
+def _feather_clipped_edges(rgba: Image.Image, is_vfx: bool) -> tuple[Image.Image, list[str]]:
+    """Suaviza com gradiente cosseno bordas cortadas no limite da célula sem apagar pés normais."""
+    w, h = rgba.size
+    if w < 24 or h < 24:
+        return rgba, []
+
+    buf = bytearray(rgba.tobytes())
+    sample_band = 4
+    thresh = 28
+
+    def count_hits_x(y_start: int, y_end: int) -> int:
+        hits = 0
+        for x in range(1, w - 1):
+            for y in range(max(1, y_start), min(h - 1, y_end)):
+                if buf[(y * w + x) * 4 + 3] > thresh:
+                    hits += 1
+                    break
+        return hits
+
+    def count_hits_y(x_start: int, x_end: int) -> int:
+        hits = 0
+        for y in range(1, h - 1):
+            for x in range(max(1, x_start), min(w - 1, x_end)):
+                if buf[(y * w + x) * 4 + 3] > thresh:
+                    hits += 1
+                    break
+        return hits
+
+    min_edge_px = 10 if is_vfx else 14
+    clipped: list[str] = []
+    if count_hits_x(1, 1 + sample_band) >= min_edge_px:
+        clipped.append("T")
+    if count_hits_y(1, 1 + sample_band) >= min_edge_px:
+        clipped.append("L")
+    if count_hits_y(w - 1 - sample_band, w - 1) >= min_edge_px:
+        clipped.append("R")
+
+    b_hits = count_hits_x(h - 1 - sample_band, h - 1)
+    if is_vfx:
+        if b_hits >= min_edge_px:
+            clipped.append("B")
+    elif b_hits >= int(w * 0.56):
+        # Somente ondas/explosões de base larga em sprites de personagem suavizam na base; pés ficam intactos.
+        clipped.append("B")
+
+    if not clipped:
+        return rgba, []
+
+    depth_v = min(32 if is_vfx else 22, max(14, h // (13 if is_vfx else 19)))
+    depth_h = min(32 if is_vfx else 22, max(14, w // (13 if is_vfx else 19)))
+
+    ramp_v = [
+        0.5 * (1.0 - math.cos(math.pi * d / depth_v)) if d > 0 else 0.0
+        for d in range(depth_v)
+    ]
+    ramp_h = [
+        0.5 * (1.0 - math.cos(math.pi * d / depth_h)) if d > 0 else 0.0
+        for d in range(depth_h)
+    ]
+
+    top_on = "T" in clipped
+    bot_on = "B" in clipped
+    left_on = "L" in clipped
+    right_on = "R" in clipped
+
+    for y in range(h):
+        fy = 1.0
+        if top_on and y < depth_v:
+            fy *= ramp_v[y]
+        if bot_on and y >= h - depth_v:
+            fy *= ramp_v[h - 1 - y]
+
+        row_off = y * w * 4
+        for x in range(w):
+            fx = 1.0
+            if left_on and x < depth_h:
+                fx *= ramp_h[x]
+            if right_on and x >= w - depth_h:
+                fx *= ramp_h[w - 1 - x]
+            factor = fx * fy
+            if factor < 0.999:
+                ai = row_off + x * 4 + 3
+                buf[ai] = int(buf[ai] * factor)
+
+    return Image.frombytes("RGBA", (w, h), bytes(buf)), clipped
+
+
+def _remove_bleed_islands(
+    rgba: Image.Image,
+    row: int,
+    col: int,
+    rows: int,
+    cols: int,
+) -> Image.Image:
+    """Remove ilhas desconectadas nas divisórias de corte (vazamento entre frames do grid)."""
     w, h = rgba.size
     buf = bytearray(rgba.tobytes())
     thresh = 24
@@ -339,12 +466,12 @@ def _remove_bleed_islands(rgba: Image.Image, quad_idx: int) -> Image.Image:
     modified = False
     for area, cx0, cy0, cx1, cy1, comp_runs in ordered[1:]:
         ratio = area / main_area
-        left_bleed = quad_idx in (2, 4) and cx0 <= 8 and ratio < 0.42
-        # Preserva projéteis/golpes frontais grandes em Q1/Q3, remove apenas lascas pequenas de aura
-        right_bleed = quad_idx in (1, 3) and cx1 >= w - 9 and ratio < 0.03
-        top_bleed = quad_idx in (3, 4) and cy0 <= 8 and ratio < 0.15
+        left_bleed = col > 0 and cx0 <= 8 and ratio < 0.42
+        # Preserva projéteis/golpes frontais grandes em células não-direitas, remove apenas lascas pequenas de aura
+        right_bleed = col < cols - 1 and cx1 >= w - 9 and ratio < 0.03
+        top_bleed = row > 0 and cy0 <= 8 and ratio < 0.15
         bottom_bleed = (
-            quad_idx in (1, 2)
+            row < rows - 1
             and cy1 >= h - 9
             and (cx1 < mx0 or cx0 > mx1)
             and ratio < 0.05
@@ -439,84 +566,176 @@ def _compute_body_center_x(cropped: Image.Image, quad_h: int) -> float:
     return fw * 0.5
 
 
-def chroma_key_quad(quad: Image.Image, is_vfx: bool) -> Image.Image:
+def chroma_key_quad(quad: Image.Image, is_vfx: bool) -> tuple[Image.Image, list[str]]:
+    """Remove fundo magenta #FF00FF com descontaminação de cor nas bordas e feather anti-corte."""
     rgba = quad.convert("RGBA")
     r, g, b, _ = rgba.split()
     min_rb = ImageChops.darker(r, b)
     excess_mag = ImageChops.subtract(min_rb, g)
 
-    # Limite anti-spill para evitar halos magenta da compressão JPEG
-    low_t = 52 if is_vfx else 40
-    high_t = 128 if is_vfx else 112
-    span = high_t - low_t
+    # Limiar mais restrito para evitar véu rosado em auras claras / nuvens / fumaça
+    low_t = 36 if is_vfx else 32
+    high_t = 112 if is_vfx else 100
+    span = max(1, high_t - low_t)
 
     alpha = excess_mag.point(
         lambda m: 0 if m >= high_t else (255 if m <= low_t else int(255 * (high_t - m) / span))
     )
 
-    # Remove halo magenta residual nos pixels semi-transparentes / de borda
-    spill_start = 42 if is_vfx else 32
-    spill = excess_mag.point(lambda m: max(0, m - spill_start))
-    r_clean = ImageChops.subtract(r, spill)
-    b_clean = ImageChops.subtract(b, spill)
+    # Zona morfológica de borda (~4px ao redor da transparência + pixels semi-transparentes)
+    trans_mask = alpha.point(lambda p: 255 if p < 245 else 0)
+    near_trans = trans_mask.filter(ImageFilter.MaxFilter(9))
 
-    result = Image.merge("RGBA", (r_clean, g, b_clean, alpha))
+    # Interior sólido preserva fidelidade cromática (cabelo rosa Sukuna, colete vermelho Luffy)
+    spill_interior = 42 if is_vfx else 32
+    int_spill = excess_mag.point(lambda m: max(0, m - spill_interior))
+    r_int = ImageChops.subtract(r, int_spill)
+    b_int = ImageChops.subtract(b, int_spill)
+
+    # Borda / semi-transparente aplica color unmixing forte sobre resíduos de #FF00FF
+    spill_edge = 8 if is_vfx else 10
+    edge_spill = excess_mag.point(
+        lambda m: min(255, int((m - spill_edge) * 1.45)) if m > spill_edge else 0
+    )
+    r_edge = ImageChops.subtract(r, edge_spill)
+    b_edge = ImageChops.subtract(b, edge_spill)
+
+    r_clean = Image.composite(r_edge, r_int, near_trans)
+    b_clean = Image.composite(b_edge, b_int, near_trans)
+
+    # Atenua halos semi-transparentes ainda muito magentas nas franjas externas
+    w, h = rgba.size
+    res_rgba = Image.merge("RGBA", (r_clean, g, b_clean, alpha))
+    rb = res_rgba.tobytes()
+    ex_b = excess_mag.tobytes()
+    nt_b = near_trans.tobytes()
+    buf = bytearray(rb)
+    for i in range(w * h):
+        ai = i * 4 + 3
+        a = buf[ai]
+        if a == 0:
+            continue
+        nt = nt_b[i]
+        ex = ex_b[i]
+        if nt > 0 and a < 245:
+            # Descontamina proporção residual (1 - a_norm) * magenta no foreground
+            inv_a = 1.0 - (a / 255.0)
+            drop = int(inv_a * min(190, ex * 1.8))
+            if drop > 0:
+                buf[i * 4] = max(0, buf[i * 4] - drop)
+                buf[i * 4 + 2] = max(0, buf[i * 4 + 2] - drop)
+            if a < 115 and ex > 18:
+                buf[ai] = max(0, int(a * max(0.0, 1.0 - (ex - 18) / 38.0)))
+
+    result = Image.frombytes("RGBA", (w, h), bytes(buf))
     if is_vfx:
         result = _strip_anomalous_vfx_bg(result)
-    return _clear_safety_border(result, margin=2)
+    result = _clear_safety_border(result, margin=1)
+    return _feather_clipped_edges(result, is_vfx)
+
+
+def _compute_vfx_anchor(cropped: Image.Image, bbox: tuple[int, int, int, int], x0: int, y0: int, quad_w: int, quad_h: int, action: str) -> tuple[float, float]:
+    """Calcula âncora estável para VFX evitando saltos entre frames durante expansão."""
+    bx0, by0, bx1, by1 = bbox
+    bbox_cx = ((bx0 + bx1) * 0.5) - x0
+    bbox_cy = ((by0 + by1) * 0.5) - y0
+
+    # Centróide ponderado pelos pixels mais densos/brilhantes
+    w, h = cropped.size
+    pix = cropped.tobytes()
+    sum_w = 0.0
+    sum_x = 0.0
+    sum_y = 0.0
+    for y in range(0, h, 2):
+        row = y * w * 4
+        for x in range(0, w, 2):
+            off = row + x * 4
+            a = pix[off + 3]
+            if a < 40:
+                continue
+            lum = (pix[off] + pix[off + 1] + pix[off + 2]) * 0.3333
+            wt = (a / 255.0) * (0.4 + 0.6 * (lum / 255.0))
+            sum_w += wt
+            sum_x += x * wt
+            sum_y += y * wt
+
+    core_cx = (sum_x / sum_w) if sum_w > 0 else bbox_cx
+    core_cy = (sum_y / sum_w) if sum_w > 0 else bbox_cy
+    q_cx_rel = (quad_w * 0.5) - x0
+    q_cy_rel = (quad_h * 0.5) - y0
+
+    if action in ("vfx_ataque_1", "vfx_ataque_4"):
+        ax = core_cx * 0.50 + bbox_cx * 0.30 + q_cx_rel * 0.20
+        ay = core_cy * 0.50 + bbox_cy * 0.30 + q_cy_rel * 0.20
+    else:
+        ax = core_cx * 0.60 + bbox_cx * 0.40
+        ay = core_cy * 0.55 + bbox_cy * 0.25 + q_cy_rel * 0.20
+
+    return round(max(0.0, min(float(w), ax)), 1), round(max(0.0, min(float(h), ay)), 1)
+
+
+def _open_sheet_image(task: dict) -> Image.Image:
+    if task.get("is_loose"):
+        return Image.open(task["internal_path"]).convert("RGBA")
+    with zipfile.ZipFile(task["zip_path"], "r") as zf:
+        raw = zf.read(task["internal_path"])
+    return Image.open(io.BytesIO(raw))
 
 
 def process_sheet_task(task: dict) -> dict:
-    zip_path = task["zip_path"]
-    internal_path = task["internal_path"]
     char_id = task["char_id"]
     phase_key = task["phase_key"]
     action = task["action"]
     is_vfx = task["is_vfx"]
+    cols = int(task.get("cols", 2))
+    rows = int(task.get("rows", 2))
+    is_extra = bool(task.get("is_extra", False))
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        raw = zf.read(internal_path)
-
-    im = Image.open(io.BytesIO(raw))
+    im = _open_sheet_image(task)
     w, h = im.size
-    qw, qh = w // 2, h // 2
+    qw, qh = w // cols, h // rows
 
-    quad_boxes = [
-        (0, 0, qw, qh),
-        (qw, 0, w, qh),
-        (0, qh, qw, h),
-        (qw, qh, w, h),
-    ]
+    cells: list[tuple[int, int, tuple[int, int, int, int]]] = []
+    for r_idx in range(rows):
+        y_top = r_idx * qh
+        y_bot = (r_idx + 1) * qh if r_idx < rows - 1 else h
+        for c_idx in range(cols):
+            x_left = c_idx * qw
+            x_right = (c_idx + 1) * qw if c_idx < cols - 1 else w
+            cells.append((r_idx, c_idx, (x_left, y_top, x_right, y_bot)))
 
-    sub_dir = "vfx" if is_vfx else action
-    out_folder = OUT_DIR / char_id / phase_key / sub_dir
     if is_vfx:
         out_folder = OUT_DIR / char_id / phase_key / "vfx" / action
+    else:
+        out_folder = OUT_DIR / char_id / phase_key / action
+    if is_extra:
+        out_folder = out_folder / "_extra_tmp"
     out_folder.mkdir(parents=True, exist_ok=True)
 
     frames_meta = []
-    for idx, box in enumerate(quad_boxes, start=1):
+    prefix = "extra" if is_extra else "frame"
+    for idx, (r_idx, c_idx, box) in enumerate(cells, start=1):
         quad = im.crop(box)
-        keyed = chroma_key_quad(quad, is_vfx)
+        keyed, clipped_edges = chroma_key_quad(quad, is_vfx)
         if not is_vfx:
-            keyed = _remove_bleed_islands(keyed, idx)
+            keyed = _remove_bleed_islands(keyed, r_idx, c_idx, rows, cols)
 
         # Encontra bounding box de pixels visíveis (alpha > 18)
         alpha_band = keyed.getchannel("A")
         mask = alpha_band.point(lambda p: 255 if p > 18 else 0)
         bbox = mask.getbbox()
         if not bbox:
-            bbox = (0, 0, qw, qh)
+            bbox = (0, 0, quad.width, quad.height)
 
-        # Padding de 2px mantendo limites do quadrante
+        # Padding de 2px mantendo limites da célula
         pad = 2
         x0 = max(0, bbox[0] - pad)
         y0 = max(0, bbox[1] - pad)
-        x1 = min(qw, bbox[2] + pad)
-        y1 = min(qh, bbox[3] + pad)
+        x1 = min(quad.width, bbox[2] + pad)
+        y1 = min(quad.height, bbox[3] + pad)
 
         cropped = keyed.crop((x0, y0, x1, y1))
-        out_file = out_folder / f"frame_{idx}.webp"
+        out_file = out_folder / f"{prefix}_{idx}.webp"
         cropped.save(out_file, format="WEBP", quality=88, method=4)
 
         rel_path = "/" + out_file.relative_to(ROOT / "public").as_posix()
@@ -524,15 +743,20 @@ def process_sheet_task(task: dict) -> dict:
             "src": rel_path,
             "w": cropped.width,
             "h": cropped.height,
-            "quadW": qw,
-            "quadH": qh,
+            "quadW": quad.width,
+            "quadH": quad.height,
             "bboxInQuad": [bbox[0], bbox[1], bbox[2], bbox[3]],
             "cropOrigin": [x0, y0],
             "rawW": bbox[2] - bbox[0],
             "rawH": bbox[3] - bbox[1],
+            "clippedEdges": clipped_edges,
         }
-        if not is_vfx:
-            meta_entry["bodyCenterX"] = round(_compute_body_center_x(cropped, qh), 1)
+        if is_vfx:
+            ax, ay = _compute_vfx_anchor(cropped, bbox, x0, y0, quad.width, quad.height, action)
+            meta_entry["anchorX"] = ax
+            meta_entry["anchorY"] = ay
+        else:
+            meta_entry["bodyCenterX"] = round(_compute_body_center_x(cropped, quad.height), 1)
         frames_meta.append(meta_entry)
 
     return {
@@ -543,6 +767,8 @@ def process_sheet_task(task: dict) -> dict:
         "is_vfx": is_vfx,
         "action": action,
         "move_label": task["move_label"],
+        "is_extra": is_extra,
+        "layout": task.get("layout", "2x2"),
         "frames": frames_meta,
     }
 
@@ -554,7 +780,15 @@ DIRECTIONAL_ANGLES_CCW = {
     "down": -74.0,
 }
 
-DIRECTIONAL_FRAME_ANGLE_MULT = (0.72, 1.0, 1.07, 0.80)
+
+def directional_frame_modifiers(idx: int, total_count: int, base_action: str) -> tuple[float, float]:
+    """Curva contínua de inclinação e pico de escala compatível com 4, 6 ou N quadros."""
+    if total_count <= 1:
+        return 1.0, 1.0
+    u = idx / float(total_count - 1)
+    angle_mult = 0.72 + 0.35 * math.sin(math.pi * u)
+    peak_scale = 1.04 if (0.38 <= u <= 0.72 and base_action in ("ataque_3", "ataque_4")) else 1.0
+    return angle_mult, peak_scale
 
 
 def _compute_phase_ref_size(phase_data: dict) -> tuple[int, int]:
@@ -583,6 +817,7 @@ def _synthesize_directional_task(task: dict) -> dict:
 
     base_angle = DIRECTIONAL_ANGLES_CCW[dir_suffix]
     frames_meta = []
+    total_frames = len(base_frames)
 
     for idx, bf in enumerate(base_frames, start=1):
         src_path = ROOT / "public" / bf["src"].lstrip("/")
@@ -593,7 +828,7 @@ def _synthesize_directional_task(task: dict) -> dict:
         work = Image.new("RGBA", (bw + margin * 2, bh + margin * 2), (0, 0, 0, 0))
         work.paste(base_img, (margin, margin))
 
-        peak_scale = 1.04 if (idx == 3 and base_action in ("ataque_3", "ataque_4")) else 1.0
+        angle_mult, peak_scale = directional_frame_modifiers(idx - 1, total_frames, base_action)
         if peak_scale != 1.0:
             new_sz = (max(1, round(work.width * peak_scale)), max(1, round(work.height * peak_scale)))
             work = work.convert("RGBa").resize(new_sz, Image.Resampling.BICUBIC).convert("RGBA")
@@ -606,7 +841,6 @@ def _synthesize_directional_task(task: dict) -> dict:
         torso_src_x = (base_ax + margin) * peak_scale
         torso_src_y = (bh * 0.48 + margin) * peak_scale
 
-        angle_mult = DIRECTIONAL_FRAME_ANGLE_MULT[min(idx - 1, 3)]
         angle_deg = base_angle * angle_mult
 
         rot = work.convert("RGBa").rotate(
@@ -708,11 +942,52 @@ def synthesize_directional_attacks(characters: dict, workers: int) -> int:
     if not synth_tasks:
         return 0
 
-    print(f"Gerando {len(synth_tasks)} conjuntos direcionais de ataque ({len(synth_tasks) * 4} quadros max) em paralelo...")
+    total_out = sum(len(t["base_frames"]) for t in synth_tasks)
+    print(f"Gerando {len(synth_tasks)} conjuntos direcionais de ataque ({total_out} quadros) em paralelo...")
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
         for res in ex.map(_synthesize_directional_task, synth_tasks):
             characters[res["char_id"]]["phases"][res["phase_key"]]["actions"][res["target_action"]] = res["frames"]
     return len(synth_tasks)
+
+
+def _interleave_extra_frames(action: str, base_frames: list[dict], extra_frames: list[dict], char_id: str, phase_key: str, is_vfx: bool) -> list[dict]:
+    """Mescla 2 quadros extras [E1, E2] aos 4 quadros base [F1..F4] mantendo frame_1..frame_6 sequenciais."""
+    if len(base_frames) != 4 or len(extra_frames) < 2:
+        return base_frames
+    order = EXTRA_INTERLEAVE_ORDER.get(action, EXTRA_INTERLEAVE_ORDER["default"])
+    slot_map = {
+        "F1": base_frames[0],
+        "F2": base_frames[1],
+        "F3": base_frames[2],
+        "F4": base_frames[3],
+        "E1": extra_frames[0],
+        "E2": extra_frames[1],
+    }
+    out_folder = (OUT_DIR / char_id / phase_key / "vfx" / action) if is_vfx else (OUT_DIR / char_id / phase_key / action)
+    tmp_dir = out_folder / "_merge_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    merged: list[dict] = []
+    staged: list[tuple[Path, Path, dict]] = []
+    for idx, token in enumerate(order, start=1):
+        src_meta = dict(slot_map[token])
+        src_file = ROOT / "public" / src_meta["src"].lstrip("/")
+        tmp_file = tmp_dir / f"frame_{idx}.webp"
+        final_file = out_folder / f"frame_{idx}.webp"
+        shutil.copy2(src_file, tmp_file)
+        staged.append((tmp_file, final_file, src_meta))
+
+    for idx, (tmp_file, final_file, src_meta) in enumerate(staged, start=1):
+        shutil.move(str(tmp_file), str(final_file))
+        src_meta["src"] = "/" + final_file.relative_to(ROOT / "public").as_posix()
+        merged.append(src_meta)
+
+    extra_tmp = out_folder / "_extra_tmp"
+    if extra_tmp.exists():
+        shutil.rmtree(extra_tmp, ignore_errors=True)
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return merged
 
 
 def compute_anchors(manifest_chars: dict):
@@ -746,10 +1021,49 @@ def compute_anchors(manifest_chars: dict):
 
             for vfx_action, frames in phase_data["vfx"].items():
                 for f in frames:
+                    if "anchorX" in f and "anchorY" in f:
+                        continue
                     bx0, by0, bx1, by1 = f["bboxInQuad"]
                     cx0, cy0 = f["cropOrigin"]
                     f["anchorX"] = round(((bx0 + bx1) * 0.5) - cx0, 1)
                     f["anchorY"] = round(((by0 + by1) * 0.5) - cy0, 1)
+
+
+def prune_orphan_assets(manifest_chars: dict) -> int:
+    """Remove arquivos .webp obsoletos e diretórios vazios fora do manifest.json."""
+    valid_paths: set[Path] = set()
+    for cdata in manifest_chars.values():
+        for pdata in cdata["phases"].values():
+            for frames in list(pdata["actions"].values()) + list(pdata["vfx"].values()):
+                for f in frames:
+                    valid_paths.add((ROOT / "public" / f["src"].lstrip("/")).resolve())
+
+    removed = 0
+    for root_str, _, files in os.walk(OUT_DIR):
+        root_p = Path(root_str)
+        for fname in files:
+            fpath = (root_p / fname).resolve()
+            if fname.lower().endswith(".webp") and fpath not in valid_paths:
+                try:
+                    fpath.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+    # Limpa diretórios temporários e pastas vazias de trás para frente
+    for root_str, _, _ in os.walk(OUT_DIR, topdown=False):
+        root_p = Path(root_str)
+        if root_p == OUT_DIR:
+            continue
+        if root_p.name in ("_extra_tmp", "_merge_tmp"):
+            shutil.rmtree(root_p, ignore_errors=True)
+            continue
+        try:
+            if not any(root_p.iterdir()):
+                root_p.rmdir()
+        except OSError:
+            pass
+    return removed
 
 
 def generate_pwa_icons(manifest_chars: dict):
@@ -799,28 +1113,74 @@ def generate_pwa_icons(manifest_chars: dict):
         canvas.save(ICONS_DIR / name, format="PNG")
 
 
-def main():
-    src_dir = find_source_dir()
+def collect_tasks(src_dir: Path) -> list[dict]:
+    """Coleta folhas de .zip e pastas soltas, priorizando 3x2 e arquivos soltos em overrides."""
     zip_files = sorted(glob.glob(str(src_dir / "**" / "*.zip"), recursive=True))
-    if not zip_files:
-        print("Nenhum arquivo .zip encontrado em", src_dir, file=sys.stderr)
+    loose_imgs = sorted(
+        p
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp")
+        for p in src_dir.rglob(ext)
+        if p.is_file()
+    )
+
+    if not zip_files and not loose_imgs:
+        print("Nenhuma folha (.zip ou imagem) encontrada em", src_dir, file=sys.stderr)
         sys.exit(1)
 
-    tasks = []
+    selected: dict[tuple, tuple[int, dict]] = {}
+
+    def register(parsed: dict, priority: int):
+        key = (
+            parsed["char_id"],
+            parsed["phase_key"],
+            parsed["is_vfx"],
+            parsed["action"],
+            parsed["is_extra"],
+        )
+        prev = selected.get(key)
+        if prev is None or priority >= prev[0]:
+            selected[key] = (priority, parsed)
+
     for zp_str in zip_files:
         zp = Path(zp_str)
-        # Nome da subpasta imediata ou prefixo do zip define o personagem
         rel_parts = zp.relative_to(src_dir).parts
         folder_char = rel_parts[0] if len(rel_parts) > 1 else zp.stem.split("_")[0]
         with zipfile.ZipFile(zp, "r") as zf:
             for name in zf.namelist():
                 if name.endswith("/"):
                     continue
-                parsed = parse_entry(zp, name, folder_char)
+                parsed = parse_entry(zp, name, folder_char, is_loose=False)
                 if parsed:
-                    tasks.append(parsed)
+                    prio = 2 if parsed["layout"] == "3x2" else 0
+                    register(parsed, prio)
 
-    print(f"Encontradas {len(tasks)} folhas 2x2 em {len(zip_files)} arquivos .zip. Processando em paralelo...")
+    for img_p in loose_imgs:
+        rel_parts = img_p.relative_to(src_dir).parts
+        if rel_parts[0].lower() == "overrides" and len(rel_parts) >= 3:
+            folder_char = rel_parts[1]
+            rel_inner = "/".join(rel_parts[1:])
+        else:
+            folder_char = rel_parts[0] if len(rel_parts) > 1 else img_p.stem.split("_")[0]
+            rel_inner = "/".join(rel_parts)
+        parsed = parse_entry(img_p, str(img_p), folder_char, is_loose=True)
+        if not parsed:
+            # Tenta com caminho relativo caso parse_entry precise das partes após src_dir
+            parsed = parse_entry(img_p, rel_inner, folder_char, is_loose=True)
+            if parsed:
+                parsed["internal_path"] = str(img_p)
+        else:
+            parsed["internal_path"] = str(img_p)
+        if parsed:
+            prio = 3 if parsed["layout"] == "3x2" else 1
+            register(parsed, prio)
+
+    return [item[1] for item in selected.values()]
+
+
+def main():
+    src_dir = find_source_dir()
+    tasks = collect_tasks(src_dir)
+    print(f"Encontradas {len(tasks)} folhas em {src_dir.name}. Processando em paralelo...")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     results = []
@@ -830,7 +1190,11 @@ def main():
             results.append(res)
 
     characters = {}
+    extra_map: dict[tuple, dict] = {}
     for res in results:
+        if res.get("is_extra"):
+            extra_map[(res["char_id"], res["phase_key"], res["is_vfx"], res["action"])] = res
+            continue
         cid = res["char_id"]
         if cid not in characters:
             characters[cid] = {
@@ -866,12 +1230,23 @@ def main():
             if re.match(r"^ataque_[1-4]$", res["action"]):
                 pdata["moves"][res["action"]] = res["move_label"]
 
+    # Mescla eventuais tiras extras 2x1 em ações/VFX de 4 frames
+    for (cid, pkey, is_vfx, action), ext in extra_map.items():
+        if cid not in characters or pkey not in characters[cid]["phases"]:
+            continue
+        pdata = characters[cid]["phases"][pkey]
+        bucket = pdata["vfx"] if is_vfx else pdata["actions"]
+        base_frames = bucket.get(action, [])
+        if len(base_frames) == 4:
+            bucket[action] = _interleave_extra_frames(action, base_frames, ext["frames"], cid, pkey, is_vfx)
+
     # Ordena fases 1..4
     for cid, cdata in characters.items():
         cdata["phases"] = dict(sorted(cdata["phases"].items(), key=lambda kv: kv[1]["phase"]))
 
     synthesize_directional_attacks(characters, workers)
     compute_anchors(characters)
+    removed_orphans = prune_orphan_assets(characters)
     generate_pwa_icons(characters)
 
     manifest = {
@@ -888,7 +1263,10 @@ def main():
         for p in c["phases"].values()
         for frames in list(p["actions"].values()) + list(p["vfx"].values())
     )
-    print(f"Concluído! {len(characters)} personagens, {total_frames} quadros WebP salvos em {OUT_DIR}")
+    print(
+        f"Concluído! {len(characters)} personagens, {total_frames} quadros WebP ativos "
+        f"({removed_orphans} órfãos removidos) em {OUT_DIR}"
+    )
 
 
 if __name__ == "__main__":

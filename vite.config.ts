@@ -28,12 +28,27 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         runtimeCaching: [
           {
-            urlPattern: /\/assets\/characters\/.*\.(webp|png|json)$/i,
+            urlPattern: /\/assets\/characters\/manifest\.json$/i,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'ak-character-manifest-v2',
+              networkTimeoutSeconds: 4,
+              expiration: {
+                maxEntries: 5,
+                maxAgeSeconds: 60 * 60 * 24 * 7,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /\/assets\/characters\/.*\.(webp|png)$/i,
             handler: 'CacheFirst',
             options: {
-              cacheName: 'ak-character-assets-v1',
+              cacheName: 'ak-character-assets-v2',
               expiration: {
-                maxEntries: 900,
+                maxEntries: 6500,
                 maxAgeSeconds: 60 * 60 * 24 * 30,
               },
               cacheableResponse: {

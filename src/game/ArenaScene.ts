@@ -2,6 +2,7 @@ import { AudioManager } from '../engine/AudioManager';
 import { CombatSystem } from '../engine/CombatSystem';
 import { FighterInputState, InputManager } from '../engine/InputManager';
 import { SpriteLoader } from '../engine/SpriteLoader';
+import type { CombatPace } from '../storage/SaveManager';
 import type {
   CombatEventPayload,
   MatchParticipantConfig,
@@ -44,6 +45,7 @@ export interface MatchConfig {
   hostSlot?: FighterSlotId;
   roomCode?: string;
   participants?: MatchParticipantConfig[];
+  combatPace?: CombatPace;
 }
 
 export interface MatchEndReport {
@@ -153,6 +155,7 @@ export class ArenaScene {
   private localSlot: FighterSlotId = 'p1';
   private hostSlot: FighterSlotId = 'p1';
   private opponentLeftFlag = false;
+  private combatPace: CombatPace = 'tactical';
   private net?: NetworkClient;
   private syncTimer = 0;
   private botSyncTimer = 0;
@@ -191,6 +194,8 @@ export class ArenaScene {
     p1Combo?: HTMLElement;
     p2Combo?: HTMLElement;
     fps?: HTMLElement;
+    cadenceFill?: HTMLElement;
+    cadenceTag?: HTMLElement;
     rumbleSlots?: Map<FighterSlotId, RumbleSlotHudRefs>;
   } = {};
 
@@ -251,9 +256,19 @@ export class ArenaScene {
     return this.fightersBySlot.get(this.localSlot) ?? this.p1;
   }
 
+  public setCombatPace(pace: CombatPace): void {
+    this.combatPace = pace;
+    for (const f of this.fighters) {
+      f.setCombatPace(pace);
+    }
+  }
+
   public startMatch(config: MatchConfig): void {
     this.combat.clearAll();
+    this.input.resetAll();
+    this.virtualControls.resetTouchState();
     this.difficulty = config.difficulty;
+    this.combatPace = config.combatPace ?? this.combatPace;
 
     this.matchMode = config.mode ?? 'solo';
     this.roomMode = config.roomMode === 'rumble' ? 'rumble' : '1v1';
@@ -310,6 +325,7 @@ export class ArenaScene {
           ];
 
     const wireFighter = (f: Fighter) => {
+      f.setCombatPace(this.combatPace);
       f.setCallbacks({
         onSpawnAttackVfx: (attacker, spec, x, y, followOwner) => {
           this.combat.spawnVfx(
@@ -464,6 +480,8 @@ export class ArenaScene {
 
   public stopMatch(): void {
     this.active = false;
+    this.input.resetAll();
+    this.virtualControls.resetTouchState();
     this.p1 = null;
     this.p2 = null;
     this.fighters = [];
@@ -730,6 +748,15 @@ export class ArenaScene {
     const localFighter = this.getLocalFighter();
     if (!this.active || this.fighters.length < 2 || !localFighter) return;
 
+    const sampledLocal = this.input.sample();
+    if (this.input.consumePauseRequested()) {
+      this.input.resetAll();
+      this.virtualControls.resetTouchState();
+      this.audio.playSfx('ui');
+      this.onPauseRequested?.();
+      return;
+    }
+
     if (this.pendingWinner !== null) {
       this.koSlowMoTimer -= dt;
       const slowDt = dt * 0.28;
@@ -809,7 +836,7 @@ export class ArenaScene {
 
     const canAct = this.roundIntroTimer <= 0;
     const localInput =
-      canAct && localFighter.hp > 0 ? this.input.sample() : createEmptyInput();
+      canAct && localFighter.hp > 0 ? sampledLocal : createEmptyInput();
     const frameInputs = new Map<FighterSlotId, FighterInputState>();
 
     for (const f of this.fighters) {
@@ -844,6 +871,8 @@ export class ArenaScene {
           this.arenaMap.platforms
         );
       }
+      // Separação corporal executada após integrar física/velocidades para manter espaçamento limpo sem puxão
+      this.combat.resolveBodyPushMulti(this.fighters, dt);
     }
 
     // Sincronização em tempo real online
@@ -897,7 +926,8 @@ export class ArenaScene {
         a4: localFighter.ki >= ATTACK_SPECS.ataque_4.kiCost,
       },
       localFighter.canEvolveNow(),
-      localFighter.getMoveNames()
+      localFighter.getMoveNames(),
+      localFighter.getGlobalCooldownRatio()
     );
 
     if (this.isHostAuthority()) {
@@ -982,6 +1012,8 @@ export class ArenaScene {
 
   private startNextRound(): void {
     this.currentRound += 1;
+    this.input.resetAll();
+    this.virtualControls.resetTouchState();
     this.pendingWinner = null;
     this.pendingWinnerTeam = null;
     this.pendingMatchOver = false;
@@ -1120,14 +1152,35 @@ export class ArenaScene {
 
     renderArenaWorld(ctx, this.arenaMap);
 
-    // Ordena: nocauteados atrás, lutadores vivos no meio, jogador local por cima
+    // Z-order por prioridade de ação: K.O. atrás, atacantes ativos na frente, jogador local desempata
+    const stateZPriority = (f: Fighter): number => {
+      if (f.hp <= 0) return -1;
+      if (f.state === 'ataque_4' || f.state === 'evolve') return 4;
+      if (
+        f.state === 'ataque_2' ||
+        f.state === 'ataque_1' ||
+        f.state === 'ataque_3'
+      ) {
+        return 3;
+      }
+      if (f.state === 'hitstun') return 1;
+      return 2;
+    };
     const ordered = [...this.fighters].sort((a, b) => {
+      const pa = stateZPriority(a);
+      const pb = stateZPriority(b);
+      if (pa !== pb) return pa - pb;
       if (a.slot === this.localSlot) return 1;
       if (b.slot === this.localSlot) return -1;
-      if ((a.hp <= 0) !== (b.hp <= 0)) return a.hp <= 0 ? -1 : 1;
       return 0;
     });
 
+    // Camada 1: auras atrás de todos os sprites para evitar halo cobrindo o oponente
+    for (const f of ordered) {
+      f.renderAura(ctx);
+    }
+
+    // Camada 2: sombras, afterimages e corpos dos lutadores
     for (const f of ordered) {
       f.render(ctx, {
         showOverheadHud: this.roomMode === 'rumble',
@@ -1283,6 +1336,10 @@ export class ArenaScene {
             </div>
           </div>
           <div class="ak-timer-box" id="hud-timer">99</div>
+          <div class="ak-cadence-pill" title="Intervalo global entre golpes">
+            <span class="ak-cadence-label" id="hud-cadence-tag">GOLPE PRONTO</span>
+            <div class="ak-cadence-track"><div class="ak-cadence-fill ready" id="hud-cadence-fill" style="width:100%"></div></div>
+          </div>
           <button type="button" class="ak-pause-btn" id="hud-pause-btn">PAUSA</button>
         </div>
 
@@ -1333,6 +1390,8 @@ export class ArenaScene {
       p1Combo: q('#hud-p1-combo'),
       p2Combo: q('#hud-p2-combo'),
       fps: q('#hud-fps'),
+      cadenceFill: q('#hud-cadence-fill'),
+      cadenceTag: q('#hud-cadence-tag'),
     };
 
     this.hudEl.querySelector('#hud-pause-btn')?.addEventListener('click', () => {
@@ -1391,6 +1450,10 @@ export class ArenaScene {
             </div>
           </div>
           <div class="ak-timer-box" id="hud-timer">150</div>
+          <div class="ak-cadence-pill" title="Intervalo global entre golpes">
+            <span class="ak-cadence-label" id="hud-cadence-tag">GOLPE PRONTO</span>
+            <div class="ak-cadence-track"><div class="ak-cadence-fill ready" id="hud-cadence-fill" style="width:100%"></div></div>
+          </div>
           <div class="ak-map-tag">${escapeHtml(this.arenaMap.themeName)} · ${escapeHtml(this.arenaMap.archetypeName)}</div>
           <button type="button" class="ak-pause-btn" id="hud-pause-btn">PAUSA</button>
         </div>
@@ -1438,6 +1501,8 @@ export class ArenaScene {
       p1Combo: q('#hud-p1-combo'),
       p2Combo: q('#hud-p2-combo'),
       fps: q('#hud-fps'),
+      cadenceFill: q('#hud-cadence-fill'),
+      cadenceTag: q('#hud-cadence-tag'),
       rumbleSlots,
     };
 
@@ -1572,6 +1637,19 @@ export class ArenaScene {
       const txt = `${fps} FPS`;
       if (this.hudRefs.fps.textContent !== txt) {
         this.hudRefs.fps.textContent = txt;
+      }
+    }
+
+    const localFighter = this.getLocalFighter();
+    if (localFighter && this.hudRefs.cadenceFill && this.hudRefs.cadenceTag) {
+      const ratio = localFighter.getGlobalCooldownRatio();
+      const readyPct = Math.max(0, Math.min(100, (1 - ratio) * 100));
+      this.hudRefs.cadenceFill.style.width = `${readyPct.toFixed(0)}%`;
+      const isReady = ratio <= 0.01;
+      this.hudRefs.cadenceFill.classList.toggle('ready', isReady);
+      const label = isReady ? 'GOLPE PRONTO' : 'INTERVALO';
+      if (this.hudRefs.cadenceTag.textContent !== label) {
+        this.hudRefs.cadenceTag.textContent = label;
       }
     }
   }
