@@ -471,6 +471,21 @@ export function renderThemeBackground(
     // Vinheta atmosférica sutil apenas para contraste dos personagens
     ctx.fillStyle = 'rgba(6, 10, 22, 0.1)';
     ctx.fillRect(0, 0, cw, ch);
+
+    // Partículas ambientais leves para dar vida ao cenário
+    const t = performance.now() * 0.001;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = theme.accentColor;
+    for (let i = 0; i < 14; i++) {
+      const seed = i * 137.5;
+      const px = ((seed * 19 + t * (12 + (i % 4) * 5) - relCamX * 0.18) % (cw + 40) + cw + 40) % (cw + 40) - 20;
+      const py = ((seed * 11 + Math.sin(t * 0.9 + i) * 28 - t * (6 + (i % 3) * 3)) % (ch * 0.78) + ch * 0.78) % (ch * 0.78);
+      const r = 1.3 + (i % 3) * 0.65;
+      ctx.globalAlpha = 0.14 + 0.12 * Math.sin(t * 2.1 + i * 1.7);
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.restore();
     return;
   }

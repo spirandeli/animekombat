@@ -168,6 +168,8 @@ export interface FighterCallbacks {
   onSpawnProjectile: (fighter: Fighter, spec: AttackSpec) => void;
   onEvolved: (fighter: Fighter, newPhase: number) => void;
   onPlaySfx: (name: 'jump' | 'atk1' | 'atk2' | 'atk3' | 'atk4' | 'evolve') => void;
+  onLand?: (fighter: Fighter) => void;
+  onJumpDust?: (fighter: Fighter) => void;
 }
 
 export function phaseForLevel(level: number): number {
@@ -240,6 +242,10 @@ export class Fighter {
   private afterimages: AfterimageSnapshot[] = [];
   private afterimageTimer = 0;
   private hasMoveInputInAttack = false;
+  private bufferedAction: {
+    type: 'jump' | 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4';
+    ttl: number;
+  } | null = null;
 
   // Constantes de física e escala
   public static readonly GROUND_Y = 540;
@@ -373,6 +379,25 @@ export class Fighter {
       if (action === 'ataque_1') return { ...base, rangeW: 142 };
       if (action === 'ataque_2') return { ...base, rangeW: 165 };
       if (action === 'ataque_4') return { ...base, rangeW: 245, rangeH: 155 };
+    } else if (this.charId === 'seiya') {
+      if (action === 'ataque_1') return { ...base, rangeW: 136 };
+      if (action === 'ataque_2') return { ...base, rangeW: 158 };
+      if (action === 'ataque_4') return { ...base, rangeW: 240, rangeH: 155 };
+    } else if (this.charId === 'zoro') {
+      if (action === 'ataque_1') return { ...base, rangeW: 146 };
+      if (action === 'ataque_2') return { ...base, rangeW: 168 };
+      if (action === 'ataque_4') return { ...base, rangeW: 250, rangeH: 160 };
+    } else if (this.charId === 'sasuke') {
+      if (action === 'ataque_1') return { ...base, rangeW: 136 };
+      if (action === 'ataque_2') return { ...base, rangeW: 162 };
+      if (action === 'ataque_4') return { ...base, rangeW: 245, rangeH: 155 };
+    } else if (this.charId === 'chopper') {
+      const monsterBonus = this.phase >= 4 ? 32 : 0;
+      if (action === 'ataque_1') return { ...base, rangeW: 128 + monsterBonus };
+      if (action === 'ataque_2') return { ...base, rangeW: 150 + monsterBonus };
+      if (action === 'ataque_4') {
+        return { ...base, rangeW: 235 + monsterBonus, rangeH: 155 + monsterBonus };
+      }
     }
     return base;
   }
@@ -477,6 +502,19 @@ export class Fighter {
     this.dropThroughTimer = Math.max(0, this.dropThroughTimer - dt);
     this.ki = Math.min(this.maxKi, this.ki + dt * 4.2);
 
+    // Input buffering (120ms) para respostas fluidas ao sair de golpes/hitstun
+    if (this.bufferedAction) {
+      this.bufferedAction.ttl -= dt;
+      if (this.bufferedAction.ttl <= 0) {
+        this.bufferedAction = null;
+      }
+    }
+    if (input.justA4) this.bufferedAction = { type: 'ataque_4', ttl: 0.12 };
+    else if (input.justA3) this.bufferedAction = { type: 'ataque_3', ttl: 0.12 };
+    else if (input.justA2) this.bufferedAction = { type: 'ataque_2', ttl: 0.12 };
+    else if (input.justA1) this.bufferedAction = { type: 'ataque_1', ttl: 0.12 };
+    else if (input.justJump) this.bufferedAction = { type: 'jump', ttl: 0.12 };
+
     // Atualiza afterimages (rastros sutis apenas em golpes especiais ou velocidade alta)
     for (let i = this.afterimages.length - 1; i >= 0; i--) {
       this.afterimages[i].age += dt;
@@ -556,7 +594,23 @@ export class Fighter {
         }
 
         default: {
-          this.updateNeutralState(dt, input);
+          const effInput: FighterInputState =
+            this.bufferedAction &&
+            !input.justA4 &&
+            !input.justA3 &&
+            !input.justA2 &&
+            !input.justA1 &&
+            !input.justJump
+              ? {
+                  ...input,
+                  justA4: this.bufferedAction.type === 'ataque_4',
+                  justA3: this.bufferedAction.type === 'ataque_3',
+                  justA2: this.bufferedAction.type === 'ataque_2',
+                  justA1: this.bufferedAction.type === 'ataque_1',
+                  justJump: this.bufferedAction.type === 'jump',
+                }
+              : input;
+          this.updateNeutralState(dt, effInput);
           break;
         }
       }
@@ -608,11 +662,13 @@ export class Fighter {
         }
       }
       if (landedPlat) {
+        const heavyLand = this.vy > 220;
         this.grounded = true;
         this.y = landedPlat.y;
         this.vy = 0;
         this.currentPlatformId = landedPlat.id;
         this.landingTimer = 0.09;
+        if (heavyLand) this.callbacks?.onLand?.(this);
         if (this.state === 'jump') {
           this.state = 'idle';
           this.stateTime = 0;
@@ -623,11 +679,13 @@ export class Fighter {
     // Piso principal
     if (this.y >= this.groundY) {
       if (!this.grounded) {
+        const heavyLand = this.vy > 220;
         this.grounded = true;
         this.y = this.groundY;
         this.vy = 0;
         this.currentPlatformId = null;
         this.landingTimer = 0.09;
+        if (heavyLand) this.callbacks?.onLand?.(this);
         if (this.state === 'jump') {
           this.state = 'idle';
           this.stateTime = 0;
@@ -686,6 +744,8 @@ export class Fighter {
 
     // Pulo
     if (this.grounded && input.justJump) {
+      this.bufferedAction = null;
+      this.callbacks?.onJumpDust?.(this);
       this.grounded = false;
       this.currentPlatformId = null;
       this.vy = Fighter.JUMP_VEL;
@@ -923,6 +983,7 @@ export class Fighter {
     this.attackDirX = dirX;
     this.attackDirY = dirY;
     this.hasMoveInputInAttack = hasHorizInput;
+    this.bufferedAction = null;
     this.beginAttackState(action, spec, false);
     return true;
   }
@@ -1408,6 +1469,22 @@ export class Fighter {
       );
     }
     ctx.restore();
+
+    // Arco de escudo translúcido quando defendendo
+    if (this.hp > 0 && this.state === 'block') {
+      const impactPulse = this.blockImpactTimer > 0 ? 1 : 0;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = impactPulse ? 0.65 : 0.34;
+      ctx.strokeStyle = impactPulse ? '#7dd3fc' : '#38bdf8';
+      ctx.lineWidth = impactPulse ? 4.5 : 3;
+      ctx.beginPath();
+      const arcStart = this.facing === 1 ? -Math.PI * 0.42 : Math.PI * 0.58;
+      const arcEnd = this.facing === 1 ? Math.PI * 0.42 : Math.PI * 1.42;
+      ctx.arc(this.x + this.facing * 12, this.y - 92, 68, arcStart, arcEnd);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // Mini HUD / Marcador de equipe acima da cabeça no modo Rumble Arena
     if (options?.showOverheadHud) {

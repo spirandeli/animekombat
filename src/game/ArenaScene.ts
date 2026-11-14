@@ -353,6 +353,13 @@ export class ArenaScene {
         onPlaySfx: (sfx) => {
           this.audio.playSfx(sfx);
         },
+        onLand: (landed) => {
+          this.combat.spawnDustPuff(landed.x, landed.y, 5);
+          this.audio.playSfx('land');
+        },
+        onJumpDust: (jumper) => {
+          this.combat.spawnDustPuff(jumper.x, jumper.y, 4);
+        },
       });
     };
 
@@ -435,6 +442,10 @@ export class ArenaScene {
           this.p2ComboDisplay = count;
           this.p2ComboFade = 1.4;
         }
+      },
+      onClash: () => {
+        this.audio.playSfx('clash');
+        this.virtualControls.vibrate([18, 16, 18]);
       },
     });
 
@@ -1197,7 +1208,30 @@ export class ArenaScene {
       this.renderOffscreenMarkers(ctx, cw, ch, viewScale);
     }
 
-    // 4. Flash de impacto / Ultimate
+    // 4. Vinheta dramática durante Ultimate, Evolução ou K.O.
+    const isClimax =
+      this.pendingWinner !== null ||
+      this.fighters.some(
+        (f) => f.hp > 0 && (f.state === 'ataque_4' || f.state === 'evolve')
+      );
+    if (isClimax) {
+      ctx.save();
+      const vig = ctx.createRadialGradient(
+        cw * 0.5,
+        ch * 0.5,
+        Math.min(cw, ch) * 0.28,
+        cw * 0.5,
+        ch * 0.5,
+        Math.max(cw, ch) * 0.72
+      );
+      vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      vig.addColorStop(1, 'rgba(4, 6, 16, 0.42)');
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.restore();
+    }
+
+    // 5. Flash de impacto / Ultimate
     if (this.combat.flashAlpha > 0) {
       ctx.save();
       ctx.fillStyle = `rgba(255, 255, 255, ${this.combat.flashAlpha.toFixed(3)})`;

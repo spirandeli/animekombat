@@ -14,6 +14,10 @@ export function defaultCharactersProgress() {
     sukuna: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
     naruto: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
     inuyasha: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
+    seiya: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
+    zoro: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
+    sasuke: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
+    chopper: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
   };
 }
 

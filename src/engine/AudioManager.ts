@@ -8,6 +8,8 @@ export type SfxType =
   | 'hit'
   | 'heavyHit'
   | 'block'
+  | 'clash'
+  | 'land'
   | 'evolve'
   | 'ko';
 
@@ -132,6 +134,15 @@ export class AudioManager {
         break;
       case 'block':
         this.tone(920, 620, 0.1, 'square', 0.25, now);
+        break;
+      case 'clash':
+        this.tone(1180, 420, 0.16, 'triangle', 0.34, now);
+        this.tone(1760, 880, 0.12, 'sine', 0.22, now);
+        this.noiseBurst(0.1, 2200, 0.28, now);
+        break;
+      case 'land':
+        this.tone(115, 52, 0.08, 'sine', 0.18, now);
+        this.noiseBurst(0.05, 420, 0.14, now);
         break;
       case 'evolve':
         this.tone(220, 880, 0.45, 'sawtooth', 0.32, now);

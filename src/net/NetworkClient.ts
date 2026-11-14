@@ -198,7 +198,7 @@ const TOKEN_STORAGE_KEY = 'animekombat_auth_token_v1';
 const GUEST_ID_STORAGE_KEY = 'animekombat_guest_id_v1';
 const LOCAL_CHANNEL_NAME = 'animekombat_local_rooms';
 const ALL_SLOTS: FighterSlotId[] = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'];
-const DEFAULT_BOT_CHARS = ['luffy', 'sukuna', 'goku', 'naruto', 'inuyasha', 'sukuna'];
+const DEFAULT_BOT_CHARS = ['luffy', 'sukuna', 'goku', 'naruto', 'inuyasha', 'zoro', 'seiya', 'sasuke', 'chopper'];
 
 function generateLocalCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';

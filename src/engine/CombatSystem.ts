@@ -71,6 +71,17 @@ interface FloatingText {
   scale: number;
 }
 
+interface ShockwaveRing {
+  active: boolean;
+  x: number;
+  y: number;
+  radius: number;
+  maxRadius: number;
+  life: number;
+  maxLife: number;
+  color: string;
+}
+
 export interface CombatEvents {
   onHitImpact?: (
     attacker: Fighter,
@@ -80,6 +91,7 @@ export interface CombatEvents {
     isHeavy: boolean
   ) => void;
   onComboUpdate?: (attackerSlot: FighterSlotId, comboCount: number) => void;
+  onClash?: (x: number, y: number) => void;
 }
 
 function rectsOverlap(a: Rect, b: Rect): boolean {
@@ -157,6 +169,17 @@ export class CombatSystem {
     scale: 1,
   }));
 
+  private readonly shockwavePool: ShockwaveRing[] = Array.from({ length: 10 }, () => ({
+    active: false,
+    x: 0,
+    y: 0,
+    radius: 10,
+    maxRadius: 110,
+    life: 0,
+    maxLife: 0.28,
+    color: '#facc15',
+  }));
+
   public hitStopRemaining = 0;
   public shakeTime = 0;
   public shakeIntensity = 0;
@@ -173,6 +196,7 @@ export class CombatSystem {
     for (const p of this.projPool) p.active = false;
     for (const pt of this.particlePool) pt.active = false;
     for (const tx of this.textPool) tx.active = false;
+    for (const sw of this.shockwavePool) sw.active = false;
     this.hitStopRemaining = 0;
     this.shakeTime = 0;
     this.shakeIntensity = 0;
@@ -330,6 +354,48 @@ export class CombatSystem {
     }
   }
 
+  public spawnShockwave(
+    x: number,
+    y: number,
+    color = '#facc15',
+    maxRadius = 115,
+    duration = 0.26
+  ): void {
+    for (const sw of this.shockwavePool) {
+      if (!sw.active) {
+        sw.active = true;
+        sw.x = x;
+        sw.y = y;
+        sw.radius = 14;
+        sw.maxRadius = maxRadius;
+        sw.life = duration;
+        sw.maxLife = duration;
+        sw.color = color;
+        return;
+      }
+    }
+  }
+
+  public spawnDustPuff(x: number, y: number, count = 5): void {
+    let spawned = 0;
+    for (const pt of this.particlePool) {
+      if (!pt.active) {
+        const spread = (Math.random() - 0.5) * 2;
+        pt.active = true;
+        pt.x = x + spread * 14;
+        pt.y = y - 2;
+        pt.vx = spread * (55 + Math.random() * 55);
+        pt.vy = -28 - Math.random() * 42;
+        pt.size = 3.5 + Math.random() * 3.5;
+        pt.maxLife = 0.22 + Math.random() * 0.14;
+        pt.life = pt.maxLife;
+        pt.color = 'rgba(226, 232, 240, 0.72)';
+        spawned++;
+        if (spawned >= count) break;
+      }
+    }
+  }
+
   public triggerScreenShake(intensity: number, duration: number): void {
     this.shakeIntensity = Math.max(this.shakeIntensity, intensity);
     this.shakeTime = Math.max(this.shakeTime, duration);
@@ -337,7 +403,8 @@ export class CombatSystem {
 
   public triggerEvolutionBurst(fighter: Fighter, newPhase: number): void {
     const color = fighter.phasePack.manifest.auraColor || '#facc15';
-    this.spawnBurstParticles(fighter.x, fighter.y - 95, color, 28, 440);
+    this.spawnBurstParticles(fighter.x, fighter.y - 95, color, 24, 420);
+    this.spawnShockwave(fighter.x, fighter.y - 95, color, 175, 0.34);
     this.spawnVfx(fighter, 'vfx_ataque_4', fighter.x, fighter.y - 95, 0.55, 0.75);
     this.spawnFloatingText(
       fighter.x,
@@ -407,9 +474,11 @@ export class CombatSystem {
         const cx = (a.x + b.x) * 0.5;
         const cy = (a.y + b.y) * 0.5 - 95;
         this.spawnBurstParticles(cx, cy, '#facc15', 12, 260);
+        this.spawnShockwave(cx, cy, '#facc15', 110, 0.24);
         this.spawnFloatingText(cx, cy - 55, 'CHOQUE!', '#facc15', 1.05);
         this.hitStopRemaining = Math.max(this.hitStopRemaining, 0.045);
         this.triggerScreenShake(4, 0.12);
+        this.events?.onClash?.(cx, cy);
       }
     }
 
@@ -584,6 +653,7 @@ export class CombatSystem {
       }
       if (spec.action === 'ataque_4') {
         this.flashAlpha = 0.35;
+        this.spawnShockwave(impactX, impactY, color, 150, 0.28);
       }
 
       if (defender.comboHitsReceived >= 2) {
@@ -760,6 +830,16 @@ export class CombatSystem {
         tx.active = false;
       }
     }
+
+    for (const sw of this.shockwavePool) {
+      if (!sw.active) continue;
+      sw.life -= dt;
+      const t = 1 - Math.max(0, sw.life / sw.maxLife);
+      sw.radius = 14 + (sw.maxRadius - 14) * (1 - Math.pow(1 - t, 2));
+      if (sw.life <= 0) {
+        sw.active = false;
+      }
+    }
   }
 
   private drawCelVfxFrame(
@@ -896,6 +976,21 @@ export class CombatSystem {
       ctx.beginPath();
       ctx.arc(pt.x, pt.y, pt.size * alpha, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
+    }
+
+    // Ondas de choque (Clash / Ultimate / Evolução)
+    for (const sw of this.shockwavePool) {
+      if (!sw.active) continue;
+      const alpha = Math.max(0, sw.life / sw.maxLife);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = alpha * 0.72;
+      ctx.strokeStyle = sw.color;
+      ctx.lineWidth = Math.max(1.5, 5 * alpha);
+      ctx.beginPath();
+      ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
+      ctx.stroke();
       ctx.restore();
     }
 
