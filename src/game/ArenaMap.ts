@@ -636,18 +636,12 @@ export function renderArenaWorld(
   const hasBgImage = isArenaBackgroundLoaded(map.themeId);
 
   if (hasBgImage) {
-    // Preserva o piso ilustrado da imagem, adicionando apenas sombra sutil e linha-guia do solo
+    // Preserva o piso ilustrado da imagem, adicionando apenas sombra sutil de contato no solo
     const shadeGrad = ctx.createLinearGradient(0, gy, 0, gy + 36);
-    shadeGrad.addColorStop(0, 'rgba(6, 10, 22, 0.24)');
+    shadeGrad.addColorStop(0, 'rgba(6, 10, 22, 0.28)');
     shadeGrad.addColorStop(1, 'rgba(6, 10, 22, 0)');
     ctx.fillStyle = shadeGrad;
     ctx.fillRect(startX, gy, totalW, 36);
-
-    ctx.save();
-    ctx.globalAlpha = 0.55;
-    ctx.fillStyle = theme.accentColor;
-    ctx.fillRect(startX, gy - 1, totalW, 3);
-    ctx.restore();
   } else {
     // Piso principal contínuo (fallback procedural)
     const floorGrad = ctx.createLinearGradient(0, gy, 0, gy + 260);
@@ -673,14 +667,19 @@ export function renderArenaWorld(
     ctx.stroke();
   }
 
-  // Barreiras laterais da arena
+  // Vinheta sutil nos limites laterais da arena (sem barras vermelhas)
   ctx.save();
-  ctx.fillStyle = hasBgImage ? 'rgba(255, 59, 92, 0.24)' : 'rgba(255, 59, 92, 0.32)';
-  ctx.fillRect(map.arenaLeft - 14, gy - 380, 8, 380);
-  ctx.fillRect(map.arenaRight + 6, gy - 380, 8, 380);
-  ctx.fillStyle = hasBgImage ? 'rgba(255, 59, 92, 0.06)' : 'rgba(255, 59, 92, 0.1)';
-  ctx.fillRect(map.arenaLeft - 220, gy - 380, 206, 380);
-  ctx.fillRect(map.arenaRight + 14, gy - 380, 206, 380);
+  const leftFade = ctx.createLinearGradient(map.arenaLeft - 140, 0, map.arenaLeft, 0);
+  leftFade.addColorStop(0, 'rgba(6, 10, 22, 0.35)');
+  leftFade.addColorStop(1, 'rgba(6, 10, 22, 0)');
+  ctx.fillStyle = leftFade;
+  ctx.fillRect(map.arenaLeft - 220, gy - 380, 220, 380);
+
+  const rightFade = ctx.createLinearGradient(map.arenaRight, 0, map.arenaRight + 140, 0);
+  rightFade.addColorStop(0, 'rgba(6, 10, 22, 0)');
+  rightFade.addColorStop(1, 'rgba(6, 10, 22, 0.35)');
+  ctx.fillStyle = rightFade;
+  ctx.fillRect(map.arenaRight, gy - 380, 220, 380);
   ctx.restore();
 
   // Plataformas escaláveis (Rumble Arena)

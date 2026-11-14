@@ -74,6 +74,12 @@ PHASE_COLORS = {
         ("#facc15", "Manto Kurama"),
         ("#fb7185", "Modo Bárion"),
     ],
+    "inuyasha": [
+        ("#93c5fd", "Humana"),
+        ("#ef4444", "Hanyou"),
+        ("#dc2626", "Youkai"),
+        ("#c084fc", "Daiyoukai"),
+    ],
 }
 
 CHAR_DISPLAY_NAMES = {
@@ -81,6 +87,7 @@ CHAR_DISPLAY_NAMES = {
     "luffy": "Monkey D. Luffy",
     "sukuna": "Ryomen Sukuna",
     "naruto": "Naruto Uzumaki",
+    "inuyasha": "Inuyasha",
 }
 
 MOVE_NAME_OVERRIDES = {
@@ -88,6 +95,22 @@ MOVE_NAME_OVERRIDES = {
     ("sukuna", 1, "ataque_2"): "Chute Sombrio",
     ("sukuna", 2, "ataque_1"): "Combo Impiedoso",
     ("sukuna", 2, "ataque_2"): "Corte Brutal",
+    ("inuyasha", 1, "ataque_1"): "Garras Retalhadoras",
+    ("inuyasha", 1, "ataque_2"): "Investida Ágil",
+    ("inuyasha", 1, "ataque_3"): "Lâmina de Sangue",
+    ("inuyasha", 1, "ataque_4"): "Fúria Retalhadora",
+    ("inuyasha", 2, "ataque_1"): "Garras Retalhadoras",
+    ("inuyasha", 2, "ataque_2"): "Corte da Tessaiga",
+    ("inuyasha", 2, "ataque_3"): "Ferida do Vento",
+    ("inuyasha", 2, "ataque_4"): "Onda Explosiva",
+    ("inuyasha", 3, "ataque_1"): "Garras Demoníacas",
+    ("inuyasha", 3, "ataque_2"): "Tessaiga Carmesim",
+    ("inuyasha", 3, "ataque_3"): "Ferida do Vento",
+    ("inuyasha", 3, "ataque_4"): "Onda Explosiva",
+    ("inuyasha", 4, "ataque_1"): "Corte Daiyoukai",
+    ("inuyasha", 4, "ataque_2"): "Tessaiga Negra",
+    ("inuyasha", 4, "ataque_3"): "Lâmina Dimensional",
+    ("inuyasha", 4, "ataque_4"): "Meidou Zangetsuha",
 }
 
 

@@ -58,7 +58,7 @@ export const ATTACK_SPECS: Record<
   ataque_1: {
     action: 'ataque_1',
     vfx: 'vfx_ataque_1',
-    duration: 0.42,
+    duration: 0.5,
     activeStart: 0.28,
     activeEnd: 0.72,
     damage: 58,
@@ -68,7 +68,7 @@ export const ATTACK_SPECS: Record<
     knockbackX: 165,
     knockbackY: -60,
     hitstun: 0.26,
-    hitStop: 0.045,
+    hitStop: 0.016,
     lungeX: 0,
     isProjectile: false,
     projectileSpeed: 0,
@@ -79,7 +79,7 @@ export const ATTACK_SPECS: Record<
   ataque_2: {
     action: 'ataque_2',
     vfx: 'vfx_ataque_2',
-    duration: 0.58,
+    duration: 0.68,
     activeStart: 0.3,
     activeEnd: 0.75,
     damage: 98,
@@ -89,7 +89,7 @@ export const ATTACK_SPECS: Record<
     knockbackX: 300,
     knockbackY: -190,
     hitstun: 0.38,
-    hitStop: 0.075,
+    hitStop: 0.035,
     lungeX: 135,
     isProjectile: false,
     projectileSpeed: 0,
@@ -100,7 +100,7 @@ export const ATTACK_SPECS: Record<
   ataque_3: {
     action: 'ataque_3',
     vfx: 'vfx_ataque_3',
-    duration: 0.64,
+    duration: 0.74,
     activeStart: 0.38,
     activeEnd: 0.65,
     damage: 115,
@@ -110,10 +110,10 @@ export const ATTACK_SPECS: Record<
     knockbackX: 250,
     knockbackY: -140,
     hitstun: 0.34,
-    hitStop: 0.065,
+    hitStop: 0.03,
     lungeX: 0,
     isProjectile: true,
-    projectileSpeed: 530,
+    projectileSpeed: 440,
     rangeW: 110,
     rangeH: 90,
     offsetY: -98,
@@ -121,7 +121,7 @@ export const ATTACK_SPECS: Record<
   ataque_4: {
     action: 'ataque_4',
     vfx: 'vfx_ataque_4',
-    duration: 0.96,
+    duration: 1.08,
     activeStart: 0.36,
     activeEnd: 0.84,
     damage: 245,
@@ -131,7 +131,7 @@ export const ATTACK_SPECS: Record<
     knockbackX: 470,
     knockbackY: -305,
     hitstun: 0.56,
-    hitStop: 0.14,
+    hitStop: 0.07,
     lungeX: 85,
     isProjectile: false,
     projectileSpeed: 0,
@@ -246,9 +246,13 @@ export class Fighter {
   public static readonly ARENA_LEFT = 70;
   public static readonly ARENA_RIGHT = 1210;
   public static readonly TARGET_BODY_HEIGHT = 186;
-  private static readonly GRAVITY = 1880;
-  private static readonly JUMP_VEL = -735;
-  private static readonly BASE_SPEED = 308;
+  private static readonly GRAVITY = 1580;
+  private static readonly JUMP_VEL = -665;
+  private static readonly BASE_SPEED = 255;
+  private static readonly actionMedianHeightCache = new WeakMap<
+    LoadedPhasePack,
+    Map<CanonicalAction, number>
+  >();
 
   constructor(
     slot: FighterSlotId,
@@ -289,8 +293,7 @@ export class Fighter {
   }
 
   public getGlobalCooldownRatio(): number {
-    if (this.globalAttackCooldown <= 0 || this.globalAttackMax <= 0) return 0;
-    return Math.min(1, this.globalAttackCooldown / this.globalAttackMax);
+    return 0;
   }
 
   public resetForNewRound(spawnX: number, spawnY: number, facing: 1 | -1): void {
@@ -366,6 +369,10 @@ export class Fighter {
       if (action === 'ataque_1') return { ...base, rangeW: 132 };
       if (action === 'ataque_2') return { ...base, rangeW: 155 };
       if (action === 'ataque_4') return { ...base, rangeW: 240, rangeH: 150 };
+    } else if (this.charId === 'inuyasha') {
+      if (action === 'ataque_1') return { ...base, rangeW: 142 };
+      if (action === 'ataque_2') return { ...base, rangeW: 165 };
+      if (action === 'ataque_4') return { ...base, rangeW: 245, rangeH: 155 };
     }
     return base;
   }
@@ -470,21 +477,22 @@ export class Fighter {
     this.dropThroughTimer = Math.max(0, this.dropThroughTimer - dt);
     this.ki = Math.min(this.maxKi, this.ki + dt * 4.2);
 
-    // Atualiza afterimages (rastros de movimento rápido / especial)
-    for (const img of this.afterimages) {
-      img.age += dt;
+    // Atualiza afterimages (rastros sutis apenas em golpes especiais ou velocidade alta)
+    for (let i = this.afterimages.length - 1; i >= 0; i--) {
+      this.afterimages[i].age += dt;
+      if (this.afterimages[i].age >= this.afterimages[i].maxAge) {
+        this.afterimages.splice(i, 1);
+      }
     }
-    this.afterimages = this.afterimages.filter((img) => img.age < img.maxAge);
     const shouldEmitTrail =
       this.hp > 0 &&
-      (Math.abs(this.vx) > 295 ||
-        this.state === 'ataque_2' ||
+      (Math.abs(this.vx) > 310 ||
         this.state === 'ataque_4' ||
         this.state === 'evolve');
     if (shouldEmitTrail) {
       this.afterimageTimer -= dt;
       if (this.afterimageTimer <= 0) {
-        this.afterimageTimer = 0.042;
+        this.afterimageTimer = 0.065;
         const curFrame = this.getCurrentFrame();
         if (curFrame) {
           this.afterimages.push({
@@ -493,9 +501,9 @@ export class Fighter {
             y: this.y,
             facing: this.facing,
             age: 0,
-            maxAge: 0.16,
+            maxAge: 0.14,
           });
-          if (this.afterimages.length > 5) {
+          if (this.afterimages.length > 3) {
             this.afterimages.shift();
           }
         }
@@ -718,10 +726,17 @@ export class Fighter {
 
     if (Math.abs(input.moveX) > 0.25) {
       const speed = Fighter.BASE_SPEED * this.getPhaseSpeedMultiplier();
-      this.vx = input.moveX * speed;
+      const targetVx = input.moveX * speed;
+      this.vx += (targetVx - this.vx) * Math.min(1, dt * 18);
       this.facing = input.moveX > 0 ? 1 : -1;
-      if (this.state !== 'run') {
-        this.state = 'run';
+
+      // Evita animação de corrida deslizando no lugar contra a borda da arena
+      const blockedByLeftWall = this.x <= this.arenaLeft + 1 && this.facing < 0;
+      const blockedByRightWall = this.x >= this.arenaRight - 1 && this.facing > 0;
+      const desiredState: FighterState =
+        blockedByLeftWall || blockedByRightWall ? 'idle' : 'run';
+      if (this.state !== desiredState) {
+        this.state = desiredState;
         this.stateTime = 0;
       }
     } else {
@@ -769,16 +784,17 @@ export class Fighter {
       }
     }
 
-    // Cancelamento de combo apenas no ritmo clássico (no ritmo tático vale o intervalo ~1s)
+    // Encadeamento fluido de combo sem espera global após acertar o golpe
     if (
-      this.combatPace === 'classic' &&
-      this.state === 'ataque_1' &&
+      (this.state === 'ataque_1' || this.state === 'ataque_2') &&
       this.attackHitDone &&
       progress >= 0.48
     ) {
       if (input.justA4 && this.tryStartAttack('ataque_4', input)) return;
       if (input.justA3 && this.tryStartAttack('ataque_3', input)) return;
-      if (input.justA2 && this.tryStartAttack('ataque_2', input)) return;
+      if (this.state === 'ataque_1' && input.justA2 && this.tryStartAttack('ataque_2', input)) {
+        return;
+      }
     }
 
     if (this.stateTime >= spec.duration) {
@@ -869,25 +885,8 @@ export class Fighter {
   ): void {
     this.ki = isRemote ? Math.max(0, this.ki - spec.kiCost) : this.ki - spec.kiCost;
     this.cooldowns[action] = spec.cooldown;
-
-    // Intervalo global tático (~0.7s início-a-início) antes de qualquer próximo ataque
-    const postDelayMap: Record<CombatPace, Record<typeof action, number>> = {
-      tactical: {
-        ataque_1: 0.28,
-        ataque_2: 0.35,
-        ataque_3: 0.42,
-        ataque_4: 0.60,
-      },
-      classic: {
-        ataque_1: 0.14,
-        ataque_2: 0.18,
-        ataque_3: 0.22,
-        ataque_4: 0.30,
-      },
-    };
-    const totalCadence = spec.duration + postDelayMap[this.combatPace][action];
-    this.globalAttackMax = totalCadence;
-    this.globalAttackCooldown = totalCadence;
+    this.globalAttackMax = 0;
+    this.globalAttackCooldown = 0;
 
     this.state = action;
     this.stateTime = 0;
@@ -916,11 +915,7 @@ export class Fighter {
   ): boolean {
     if (this.hp <= 0) return false;
     const spec = this.getAttackSpec(action);
-    if (
-      this.globalAttackCooldown > 0 ||
-      this.cooldowns[action] > 0 ||
-      this.ki < spec.kiCost
-    ) {
+    if (this.cooldowns[action] > 0 || this.ki < spec.kiCost) {
       return false;
     }
 
@@ -1127,20 +1122,105 @@ export class Fighter {
     return this.phasePack.actions.has(candidate) ? candidate : baseAction;
   }
 
-  public getCurrentFrame(): LoadedFrame | undefined {
-    let action: CanonicalAction = 'idle';
+  private resolveCurrentAction(): CanonicalAction {
     if (this.state === 'evolve') {
-      action = 'ataque_4';
-    } else if (
+      return 'ataque_4';
+    }
+    if (
       this.state === 'ataque_1' ||
       this.state === 'ataque_2' ||
       this.state === 'ataque_3' ||
       this.state === 'ataque_4'
     ) {
-      action = this.getDirectionalAttackAction(this.state);
-    } else {
-      action = this.state;
+      return this.getDirectionalAttackAction(this.state);
     }
+    return this.state;
+  }
+
+  private getActionMedianRawHeight(action: CanonicalAction): number {
+    let packMap = Fighter.actionMedianHeightCache.get(this.phasePack);
+    if (!packMap) {
+      packMap = new Map<CanonicalAction, number>();
+      Fighter.actionMedianHeightCache.set(this.phasePack, packMap);
+    }
+    const cached = packMap.get(action);
+    if (cached !== undefined) return cached;
+
+    const frames =
+      this.phasePack.actions.get(action) ?? this.phasePack.actions.get('idle') ?? [];
+    if (frames.length === 0) {
+      const fallback = Math.max(100, this.phasePack.manifest.refBodyHeight || 350);
+      packMap.set(action, fallback);
+      return fallback;
+    }
+    const sorted = frames
+      .map((f) => Math.max(80, f.meta.rawH || f.meta.h || 350))
+      .sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median =
+      sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) * 0.5;
+    packMap.set(action, median);
+    return median;
+  }
+
+  private computeNormalizedFrameScale(
+    frame: LoadedFrame,
+    action: CanonicalAction,
+    refHeight: number
+  ): { scale: number; scaleX: number; scaleY: number } {
+    const medianH = this.getActionMedianRawHeight(action);
+    const frameH = Math.max(80, frame.meta.rawH || frame.meta.h || medianH);
+    // Suaviza variação pontual de altura dentro da mesma ação
+    const blendedH = medianH * 0.78 + frameH * 0.22;
+
+    let effectiveRefH = refHeight;
+    if (this.state === 'crouch') {
+      if (medianH >= refHeight * 0.82) {
+        effectiveRefH = medianH / 0.78;
+      } else {
+        effectiveRefH = Math.max(refHeight * 0.9, Math.min(refHeight * 1.15, blendedH));
+      }
+    } else if (this.state === 'jump') {
+      effectiveRefH = Math.max(refHeight * 0.9, Math.min(refHeight * 1.16, blendedH));
+    } else if (
+      this.state === 'ataque_1' ||
+      this.state === 'ataque_2' ||
+      this.state === 'ataque_3' ||
+      this.state === 'ataque_4' ||
+      this.state === 'evolve'
+    ) {
+      if (blendedH > refHeight * 1.18) {
+        effectiveRefH = Math.min(
+          refHeight * 1.55,
+          refHeight + (blendedH - refHeight) * 0.78
+        );
+      } else if (blendedH < refHeight * 0.86) {
+        effectiveRefH = refHeight * 0.86;
+      } else {
+        effectiveRefH = blendedH;
+      }
+    } else {
+      effectiveRefH = Math.max(refHeight * 0.88, Math.min(refHeight * 1.15, blendedH));
+    }
+
+    const scale = Fighter.TARGET_BODY_HEIGHT / Math.max(100, effectiveRefH);
+    let renderScaleX = scale;
+    let renderScaleY = scale;
+
+    if (!this.grounded && this.vy < -320) {
+      renderScaleX = scale * 0.96;
+      renderScaleY = scale * 1.05;
+    } else if (this.landingTimer > 0) {
+      const landRatio = this.landingTimer / 0.09;
+      renderScaleX = scale * (1 + 0.05 * landRatio);
+      renderScaleY = scale * (1 - 0.04 * landRatio);
+    }
+
+    return { scale, scaleX: renderScaleX, scaleY: renderScaleY };
+  }
+
+  public getCurrentFrame(): LoadedFrame | undefined {
+    const action = this.resolveCurrentAction();
 
     const frames =
       this.phasePack.actions.get(action) ?? this.phasePack.actions.get('idle');
@@ -1239,22 +1319,10 @@ export class Fighter {
     const frame = this.getCurrentFrame();
     if (!frame) return;
 
+    const action = this.resolveCurrentAction();
     const refHeight = Math.max(100, this.phasePack.manifest.refBodyHeight || 350);
-    const scale = Fighter.TARGET_BODY_HEIGHT / refHeight;
-
-    let renderScaleX = scale;
-    let renderScaleY = scale;
-    if (this.state === 'crouch' && frame.meta.rawH >= refHeight * 0.90) {
-      renderScaleX = scale * 1.04;
-      renderScaleY = scale * 0.86;
-    } else if (!this.grounded && this.vy < -320) {
-      renderScaleX = scale * 0.95;
-      renderScaleY = scale * 1.06;
-    } else if (this.landingTimer > 0) {
-      const landRatio = this.landingTimer / 0.09;
-      renderScaleX = scale * (1 + 0.06 * landRatio);
-      renderScaleY = scale * (1 - 0.05 * landRatio);
-    }
+    const { scale, scaleX: renderScaleX, scaleY: renderScaleY } =
+      this.computeNormalizedFrameScale(frame, action, refHeight);
 
     // Sombra na superfície imediatamente abaixo (plataforma ou chão)
     let shadowSurfaceY = this.groundY;
@@ -1287,7 +1355,7 @@ export class Fighter {
     ctx.fill();
     ctx.restore();
 
-    // Afterimages sutis atrás do lutador em movimento rápido / ataque
+    // Afterimages sutis atrás do lutador (sem ctx.filter para manter 60fps estável)
     if (this.hp > 0 && this.afterimages.length > 0) {
       for (const trail of this.afterimages) {
         const lifeRatio = Math.max(0, 1 - trail.age / trail.maxAge);
@@ -1295,8 +1363,7 @@ export class Fighter {
         ctx.save();
         ctx.translate(trail.x, trail.y);
         ctx.scale(trail.facing * scale, scale);
-        ctx.globalAlpha = lifeRatio * 0.24;
-        ctx.filter = 'saturate(1.6) brightness(1.15)';
+        ctx.globalAlpha = lifeRatio * 0.2;
         ctx.drawImage(
           trail.frame.image,
           -trail.frame.meta.anchorX,
@@ -1315,8 +1382,6 @@ export class Fighter {
 
     if (this.hp <= 0) {
       ctx.globalAlpha = 0.36;
-    } else if (this.state === 'hitstun' && Math.floor(this.stateTime * 25) % 2 === 0) {
-      ctx.filter = 'brightness(1.85)';
     }
 
     ctx.drawImage(
@@ -1326,6 +1391,22 @@ export class Fighter {
       frame.meta.w,
       frame.meta.h
     );
+
+    if (
+      this.hp > 0 &&
+      this.state === 'hitstun' &&
+      Math.floor(this.stateTime * 22) % 2 === 0
+    ) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.45;
+      ctx.drawImage(
+        frame.image,
+        -frame.meta.anchorX,
+        -frame.meta.anchorY,
+        frame.meta.w,
+        frame.meta.h
+      );
+    }
     ctx.restore();
 
     // Mini HUD / Marcador de equipe acima da cabeça no modo Rumble Arena

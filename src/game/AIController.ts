@@ -116,11 +116,11 @@ export class AIController {
       target.state === 'ataque_4';
 
     const reactionInterval =
-      this.difficulty === 'easy' ? 0.50 : this.difficulty === 'medium' ? 0.30 : 0.18;
+      this.difficulty === 'easy' ? 0.75 : this.difficulty === 'medium' ? 0.48 : 0.28;
     const blockChance =
-      this.difficulty === 'easy' ? 0.2 : this.difficulty === 'medium' ? 0.55 : 0.82;
+      this.difficulty === 'easy' ? 0.12 : this.difficulty === 'medium' ? 0.35 : 0.60;
     const aggression =
-      this.difficulty === 'easy' ? 0.38 : this.difficulty === 'medium' ? 0.68 : 0.92;
+      this.difficulty === 'easy' ? 0.28 : this.difficulty === 'medium' ? 0.50 : 0.75;
     const canAttackGlobal = self.globalAttackCooldown <= 0;
     const faceDir: 1 | -1 = dx >= 0 ? 1 : -1;
     const approachOrAlign = dist > 115 ? dirToTarget : self.facing === faceDir ? 0 : dirToTarget;
@@ -240,11 +240,10 @@ export class AIController {
           this.moveDir = approachOrAlign;
           this.queueDirectionalAttack('a4', dx, dy);
         } else if (
-          self.combatPace === 'classic' &&
           self.state === 'ataque_1' &&
           self.attackHitDone &&
           self.ki >= ATTACK_SPECS.ataque_2.kiCost &&
-          Math.random() < 0.7 * aggression
+          Math.random() < 0.42 * aggression
         ) {
           this.moveDir = approachOrAlign;
           this.queueDirectionalAttack('a2', dx, dy);

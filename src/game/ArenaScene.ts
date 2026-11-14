@@ -1152,19 +1152,18 @@ export class ArenaScene {
 
     renderArenaWorld(ctx, this.arenaMap);
 
-    // Z-order por prioridade de ação: K.O. atrás, atacantes ativos na frente, jogador local desempata
+    // Z-order estável para evitar troca brusca de profundidade durante trocas de golpes
     const stateZPriority = (f: Fighter): number => {
       if (f.hp <= 0) return -1;
-      if (f.state === 'ataque_4' || f.state === 'evolve') return 4;
+      if (f.state === 'ataque_4' || f.state === 'evolve') return 3;
       if (
         f.state === 'ataque_2' ||
         f.state === 'ataque_1' ||
         f.state === 'ataque_3'
       ) {
-        return 3;
+        return 2;
       }
-      if (f.state === 'hitstun') return 1;
-      return 2;
+      return 1;
     };
     const ordered = [...this.fighters].sort((a, b) => {
       const pa = stateZPriority(a);

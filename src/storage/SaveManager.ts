@@ -100,6 +100,7 @@ export function createDefaultSave(): SaveData {
       luffy: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
       sukuna: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
       naruto: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
+      inuyasha: { xp: 0, level: 1, unlockedPhase: 1, wins: 0, matches: 0 },
     },
     settings: {
       controlsOpacity: 0.85,

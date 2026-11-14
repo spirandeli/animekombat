@@ -377,6 +377,42 @@ export class CombatSystem {
       return false;
     }
 
+    // Choque simultâneo (Clash) quando dois golpes corpo a corpo colidem no mesmo instante
+    for (let i = 0; i < fighters.length; i++) {
+      const a = fighters[i];
+      if (a.hp <= 0) continue;
+      const hitA = a.getActiveAttackHitbox();
+      if (!hitA || hitA.spec.isProjectile) continue;
+      for (let j = i + 1; j < fighters.length; j++) {
+        const b = fighters[j];
+        if (b.hp <= 0 || a.team === b.team) continue;
+        if (
+          a.hitTargetsInCurrentAttack.has(b.slot) ||
+          b.hitTargetsInCurrentAttack.has(a.slot)
+        ) {
+          continue;
+        }
+        const hitB = b.getActiveAttackHitbox();
+        if (!hitB || hitB.spec.isProjectile) continue;
+        if (!rectsOverlap(hitA.rect, hitB.rect)) continue;
+
+        a.hitTargetsInCurrentAttack.add(b.slot);
+        b.hitTargetsInCurrentAttack.add(a.slot);
+        a.attackHitDone = true;
+        b.attackHitDone = true;
+
+        const dir = a.x <= b.x ? 1 : -1;
+        a.vx = -dir * 185;
+        b.vx = dir * 185;
+        const cx = (a.x + b.x) * 0.5;
+        const cy = (a.y + b.y) * 0.5 - 95;
+        this.spawnBurstParticles(cx, cy, '#facc15', 12, 260);
+        this.spawnFloatingText(cx, cy - 55, 'CHOQUE!', '#facc15', 1.05);
+        this.hitStopRemaining = Math.max(this.hitStopRemaining, 0.045);
+        this.triggerScreenShake(4, 0.12);
+      }
+    }
+
     // Colisões corpo a corpo entre times opostos (pushbox é aplicado em ArenaScene pós-movimento)
     for (let i = 0; i < fighters.length; i++) {
       const attacker = fighters[i];
@@ -410,6 +446,8 @@ export class CombatSystem {
 
           if (absDx < minDist && dy < 115) {
             const needed = minDist - absDx;
+            const stepPush =
+              needed > 48 ? needed : Math.min(needed, Math.max(4, 380 * dt));
             const sign =
               absDx > 0.5
                 ? dx > 0
@@ -422,15 +460,15 @@ export class CombatSystem {
             const prevBx = b.x;
             a.x = Math.max(
               a.arenaLeft,
-              Math.min(a.arenaRight, a.x - sign * needed * 0.5)
+              Math.min(a.arenaRight, a.x - sign * stepPush * 0.5)
             );
             b.x = Math.max(
               b.arenaLeft,
-              Math.min(b.arenaRight, b.x + sign * needed * 0.5)
+              Math.min(b.arenaRight, b.x + sign * stepPush * 0.5)
             );
             const movedA = Math.abs(a.x - prevAx);
             const movedB = Math.abs(b.x - prevBx);
-            const leftover = needed - (movedA + movedB);
+            const leftover = stepPush - (movedA + movedB);
             if (leftover > 0.1) {
               // Transfere excedente quando um lutador está encostado na parede da arena
               a.x = Math.max(
@@ -520,8 +558,8 @@ export class CombatSystem {
         impactX,
         impactY,
         color,
-        spec.action === 'ataque_4' ? 26 : 14,
-        spec.action === 'ataque_4' ? 420 : 280
+        spec.action === 'ataque_4' ? 18 : 9,
+        spec.action === 'ataque_4' ? 380 : 250
       );
       this.spawnFloatingText(
         defender.x,
@@ -742,7 +780,7 @@ export class CombatSystem {
     }
 
     ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 0.84 * alpha;
+    ctx.globalAlpha = 0.78 * alpha;
     ctx.drawImage(
       frame.image,
       -frame.meta.anchorX,
@@ -752,7 +790,7 @@ export class CombatSystem {
     );
 
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.24 * alpha;
+    ctx.globalAlpha = 0.14 * alpha;
     ctx.drawImage(
       frame.image,
       -frame.meta.anchorX,
