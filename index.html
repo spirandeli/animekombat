@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#090a10" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="AnimeKombat" />
+    <meta
+      name="description"
+      content="AnimeKombat — Jogo de luta 2D estilo anime mobile-first com sistema de evolução em 4 fases e suporte 100% offline."
+    />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+    <link rel="apple-touch-icon" sizes="192x192" href="/icons/icon-192.png" />
+    <title>AnimeKombat — 2D Anime Fighter</title>
+  </head>
+  <body>
+    <div id="app" class="ak-app">
+      <!-- Canvas de Combate -->
+      <canvas id="game-canvas" class="ak-canvas"></canvas>
+
+      <!-- HUD de Combate (Landscape-First) -->
+      <div id="combat-hud" class="ak-hud hidden" aria-hidden="true"></div>
+
+      <!-- Controles Virtuais Multi-Touch -->
+      <div id="virtual-controls" class="ak-controls hidden" aria-hidden="true"></div>
+
+      <!-- Camada de Menus (Título, Seleção, Loading, Pausa, Configurações, Resultado) -->
+      <div id="ui-layer" class="ak-ui-layer"></div>
+
+      <!-- Overlay de Orientação Portrait durante Luta -->
+      <div id="orientation-guard" class="ak-orientation-guard hidden" role="dialog" aria-modal="true">
+        <div class="ak-orientation-card">
+          <div class="ak-phone-rotate-icon" aria-hidden="true">
+            <div class="ak-phone-body"></div>
+          </div>
+          <h2>Gire o aparelho para a horizontal</h2>
+          <p>A arena de AnimeKombat é otimizada para modo Paisagem (Landscape). A partida foi pausada.</p>
+          <button id="btn-try-landscape" class="ak-btn ak-btn-primary" type="button">
+            Ativar Tela Cheia Horizontal
+          </button>
+        </div>
+      </div>
+
+      <!-- Banner de Atualização PWA -->
+      <div id="pwa-update-toast" class="ak-toast hidden" role="status">
+        <span>Nova versão do AnimeKombat pronta!</span>
+        <button id="btn-pwa-reload" class="ak-btn ak-btn-accent ak-btn-sm" type="button">
+          Atualizar
+        </button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

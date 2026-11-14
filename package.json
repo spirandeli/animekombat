@@ -1,0 +1,22 @@
+{
+  "name": "animekombat-pwa",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host",
+    "start": "node server/prod.mjs",
+    "process-sprites": "node scripts/process_sprites_2x2.mjs"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vite-plugin-pwa": "^0.21.1"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
+  }
+}
