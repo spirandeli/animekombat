@@ -1,8 +1,28 @@
 import type { FighterInputState } from '../engine/InputManager';
 import type { AIDifficulty } from '../game/AIController';
 import type { MatchConfig } from '../game/ArenaScene';
-import type { FighterState } from '../game/Fighter';
+import {
+  teamForSlot,
+  type FighterSlotId,
+  type FighterState,
+  type FighterTeam,
+} from '../game/Fighter';
 import { CharacterProgress, SaveManager } from '../storage/SaveManager';
+
+export { teamForSlot, type FighterSlotId, type FighterTeam };
+export type SlotMode = 'human' | 'bot' | 'closed';
+export type RoomMode = '1v1' | 'rumble';
+
+export interface MatchParticipantConfig {
+  slot: FighterSlotId;
+  team: FighterTeam;
+  userId: string | null;
+  displayName: string;
+  charId: string;
+  startPhase: number;
+  level: number;
+  isBot: boolean;
+}
 
 export interface UserProfile {
   id: string;
@@ -48,6 +68,9 @@ export interface FriendsOverview {
 }
 
 export interface RoomSlotState {
+  slot?: FighterSlotId;
+  team?: FighterTeam;
+  slotMode?: SlotMode;
   userId: string | null;
   username: string;
   friendCode: string | null;
@@ -63,11 +86,16 @@ export interface RoomState {
   code: string;
   isPublic: boolean;
   hostId: string;
+  roomMode?: RoomMode;
+  teamSize?: 1 | 2 | 3;
+  mapSeed?: number;
+  mapTheme?: string;
   p2Mode: 'human' | 'bot';
   botDifficulty: AIDifficulty;
   status: 'lobby' | 'fighting';
   p1: RoomSlotState;
   p2: RoomSlotState;
+  slots?: Record<FighterSlotId, RoomSlotState>;
   createdAt: number;
 }
 
@@ -76,6 +104,14 @@ export interface OpenRoomSummary {
   hostName: string;
   hostFriendCode: string | null;
   isFriend: boolean;
+  roomMode?: RoomMode;
+  teamSize?: 1 | 2 | 3;
+  mapTheme?: string;
+  occupiedCount?: number;
+  humanCount?: number;
+  botCount?: number;
+  maxPlayers?: number;
+  openHumanSlots?: number;
   p2Mode: 'human' | 'bot';
   hasFreeSlot: boolean;
   p1CharId: string;
@@ -94,16 +130,19 @@ export interface RoomInvitePayload {
 }
 
 export interface RemoteFighterSyncPayload {
-  slot: 'p1' | 'p2';
+  slot: FighterSlotId;
   seq: number;
   x: number;
   y: number;
   vx: number;
   vy: number;
   facing: 1 | -1;
+  attackDirX?: number;
+  attackDirY?: number;
   grounded: boolean;
   hp: number;
   peerHp?: number;
+  hpMap?: Partial<Record<FighterSlotId, number>>;
   roundTimer?: number;
   ki: number;
   evoEnergy: number;
@@ -117,14 +156,16 @@ export interface RemoteFighterSyncPayload {
 
 export interface CombatEventPayload {
   kind: 'attack' | 'hit' | 'projectile' | 'evolve' | 'ko';
-  slot: 'p1' | 'p2';
+  slot: FighterSlotId;
   action?: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4';
   newPhase?: number;
   damage?: number;
   blocked?: boolean;
   winner?: 'p1' | 'p2' | 'draw';
+  winnerTeam?: 1 | 2 | 'draw';
   p1HpRemaining?: number;
   p2HpRemaining?: number;
+  hpRemainingMap?: Partial<Record<FighterSlotId, number>>;
   p1FinalPhase?: number;
 }
 
@@ -142,11 +183,14 @@ export interface NetworkEventMap {
   remoteSync: RemoteFighterSyncPayload;
   remoteEvent: CombatEventPayload;
   opponentLeft: string;
+  playerLeft: { slot: FighterSlotId; username: string };
 }
 
 const TOKEN_STORAGE_KEY = 'animekombat_auth_token_v1';
 const GUEST_ID_STORAGE_KEY = 'animekombat_guest_id_v1';
 const LOCAL_CHANNEL_NAME = 'animekombat_local_rooms';
+const ALL_SLOTS: FighterSlotId[] = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'];
+const DEFAULT_BOT_CHARS = ['luffy', 'sukuna', 'goku', 'luffy', 'sukuna', 'goku'];
 
 function generateLocalCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -155,6 +199,96 @@ function generateLocalCode(): string {
     out += chars[Math.floor(Math.random() * chars.length)];
   }
   return out;
+}
+
+function randomLocalSeed(): number {
+  return (Math.floor(Math.random() * 0x7fffffff) >>> 0) || 1337;
+}
+
+function difficultyLabel(diff: AIDifficulty): string {
+  return diff === 'easy' ? 'Fácil' : diff === 'master' ? 'Mestre' : 'Médio';
+}
+
+function buildLocalBotSlot(
+  slot: FighterSlotId,
+  diff: AIDifficulty,
+  charId?: string,
+  startPhase = 1,
+  level = 1
+): RoomSlotState {
+  const idx = Math.max(0, ALL_SLOTS.indexOf(slot));
+  return {
+    slot,
+    team: teamForSlot(slot),
+    slotMode: 'bot',
+    userId: 'bot',
+    username: `BOT ${slot.toUpperCase()} (${difficultyLabel(diff)})`,
+    friendCode: null,
+    isGuest: false,
+    isBot: true,
+    charId: charId || DEFAULT_BOT_CHARS[idx % DEFAULT_BOT_CHARS.length],
+    startPhase,
+    level,
+    ready: true,
+  };
+}
+
+function buildLocalEmptySlot(slot: FighterSlotId, charId?: string): RoomSlotState {
+  const idx = Math.max(0, ALL_SLOTS.indexOf(slot));
+  return {
+    slot,
+    team: teamForSlot(slot),
+    slotMode: 'human',
+    userId: null,
+    username: 'Vaga Aberta...',
+    friendCode: null,
+    isGuest: false,
+    isBot: false,
+    charId: charId || DEFAULT_BOT_CHARS[idx % DEFAULT_BOT_CHARS.length],
+    startPhase: 1,
+    level: 1,
+    ready: false,
+  };
+}
+
+function buildLocalClosedSlot(slot: FighterSlotId): RoomSlotState {
+  return {
+    slot,
+    team: teamForSlot(slot),
+    slotMode: 'closed',
+    userId: null,
+    username: 'Fechado',
+    friendCode: null,
+    isGuest: false,
+    isBot: false,
+    charId: 'luffy',
+    startPhase: 1,
+    level: 1,
+    ready: true,
+  };
+}
+
+function getLocalActiveSlots(room: RoomState): FighterSlotId[] {
+  const size = room.roomMode === 'rumble' ? Math.max(2, Math.min(3, room.teamSize ?? 3)) : 1;
+  return ALL_SLOTS.slice(0, size * 2);
+}
+
+function findLocalUserSlot(room: RoomState, userId: string): FighterSlotId | null {
+  if (!room.slots) return room.p1.userId === userId ? 'p1' : room.p2.userId === userId ? 'p2' : null;
+  for (const sid of ALL_SLOTS) {
+    const s = room.slots[sid];
+    if (s && s.slotMode !== 'closed' && !s.isBot && s.userId === userId) {
+      return sid;
+    }
+  }
+  return null;
+}
+
+function syncLocalRoomLegacy(room: RoomState): void {
+  if (!room.slots) return;
+  room.p1 = { ...room.slots.p1 };
+  room.p2 = { ...room.slots.p2 };
+  room.p2Mode = room.slots.p2.slotMode === 'bot' ? 'bot' : 'human';
 }
 
 export class NetworkClient {
@@ -471,20 +605,35 @@ export class NetworkClient {
   }
 
   public createRoom(options?: {
+    roomMode?: RoomMode;
+    teamSize?: 1 | 2 | 3;
     p2Mode?: 'human' | 'bot';
     botDifficulty?: AIDifficulty;
     isPublic?: boolean;
+    mapTheme?: string;
+    mapSeed?: number;
+    fillBots?: boolean;
     charId?: string;
     startPhase?: number;
     level?: number;
   }): void {
     const charId = options?.charId ?? 'goku';
     const prog = this.save.getCharacterProgress(charId);
+    const roomMode: RoomMode = options?.roomMode === 'rumble' ? 'rumble' : '1v1';
+    const teamSize: 1 | 2 | 3 =
+      roomMode === 'rumble'
+        ? (Math.max(2, Math.min(3, options?.teamSize ?? 3)) as 2 | 3)
+        : 1;
     const payload = {
       type: 'room:create',
+      roomMode,
+      teamSize,
       p2Mode: options?.p2Mode ?? 'human',
       botDifficulty: options?.botDifficulty ?? this.save.getData().settings.difficulty,
       isPublic: options?.isPublic ?? true,
+      mapTheme: options?.mapTheme ?? 'random',
+      mapSeed: options?.mapSeed ?? randomLocalSeed(),
+      fillBots: Boolean(options?.fillBots),
       charId,
       startPhase: options?.startPhase ?? 1,
       level: options?.level ?? prog.level,
@@ -498,48 +647,51 @@ export class NetworkClient {
     // Fallback offline para sala local (Bot ou BroadcastChannel entre abas)
     const code = generateLocalCode();
     const diff = payload.botDifficulty;
+    const slots = {} as Record<FighterSlotId, RoomSlotState>;
+    slots.p1 = {
+      slot: 'p1',
+      team: 1,
+      slotMode: 'human',
+      userId: this.getActorId(),
+      username: this.getDisplayName(),
+      friendCode: this.user?.friendCode ?? null,
+      isGuest: !this.user,
+      isBot: false,
+      charId: payload.charId,
+      startPhase: payload.startPhase,
+      level: payload.level,
+      ready: true,
+    };
+    for (const sid of ALL_SLOTS.slice(1)) {
+      if (roomMode === 'rumble' && payload.fillBots) {
+        slots[sid] = buildLocalBotSlot(sid, diff, undefined, payload.startPhase, payload.level);
+      } else if (sid === 'p2' && payload.p2Mode === 'bot') {
+        slots[sid] = buildLocalBotSlot(
+          sid,
+          diff,
+          payload.charId === 'luffy' ? 'goku' : 'luffy',
+          payload.startPhase,
+          payload.level
+        );
+      } else {
+        slots[sid] = buildLocalEmptySlot(sid);
+      }
+    }
+
     const room: RoomState = {
       code,
       isPublic: payload.isPublic,
       hostId: this.getActorId(),
+      roomMode,
+      teamSize,
+      mapSeed: payload.mapSeed,
+      mapTheme: payload.mapTheme,
       p2Mode: payload.p2Mode,
       botDifficulty: diff,
       status: 'lobby',
-      p1: {
-        userId: this.getActorId(),
-        username: this.getDisplayName(),
-        friendCode: this.user?.friendCode ?? null,
-        isGuest: !this.user,
-        isBot: false,
-        charId: payload.charId,
-        startPhase: payload.startPhase,
-        level: payload.level,
-        ready: true,
-      },
-      p2:
-        payload.p2Mode === 'bot'
-          ? {
-              userId: 'bot',
-              username: `BOT (${diff === 'easy' ? 'Fácil' : diff === 'master' ? 'Mestre' : 'Médio'})`,
-              friendCode: null,
-              isGuest: false,
-              isBot: true,
-              charId: payload.charId === 'luffy' ? 'goku' : 'luffy',
-              startPhase: payload.startPhase,
-              level: payload.level,
-              ready: true,
-            }
-          : {
-              userId: null,
-              username: 'Aguardando Amigo...',
-              friendCode: null,
-              isGuest: false,
-              isBot: false,
-              charId: 'luffy',
-              startPhase: 1,
-              level: 1,
-              ready: false,
-            },
+      slots,
+      p1: { ...slots.p1 },
+      p2: { ...slots.p2 },
       createdAt: Date.now(),
     };
     this.localRooms.set(code, room);
@@ -569,28 +721,58 @@ export class NetworkClient {
     }
 
     const localRoom = this.localRooms.get(cleanCode);
-    if (localRoom && !localRoom.p2.userId) {
-      localRoom.p2Mode = 'human';
-      localRoom.p2 = {
-        userId: this.getActorId(),
-        username: this.getDisplayName(),
-        friendCode: this.user?.friendCode ?? null,
-        isGuest: !this.user,
-        isBot: false,
-        charId,
-        startPhase: options?.startPhase ?? 1,
-        level: options?.level ?? prog.level,
-        ready: false,
-      };
-      this.currentRoom = localRoom;
-      this.broadcastLocal({ type: 'room:state', room: localRoom });
-      this.emit('roomUpdated', localRoom);
-    } else {
-      this.emit(
-        'roomError',
-        'Sem conexão com o servidor para entrar nessa sala.'
-      );
+    if (localRoom) {
+      if (!localRoom.slots) {
+        localRoom.slots = {
+          p1: { ...localRoom.p1, slot: 'p1', team: 1, slotMode: 'human' },
+          p2: { ...localRoom.p2, slot: 'p2', team: 2, slotMode: localRoom.p2.isBot ? 'bot' : 'human' },
+          p3: buildLocalEmptySlot('p3'),
+          p4: buildLocalEmptySlot('p4'),
+          p5: buildLocalEmptySlot('p5'),
+          p6: buildLocalEmptySlot('p6'),
+        };
+      }
+      const activeIds = getLocalActiveSlots(localRoom);
+      const openSlots = activeIds.filter((sid) => {
+        const s = localRoom.slots![sid];
+        return s.slotMode === 'human' && !s.userId;
+      });
+      if (openSlots.length > 0) {
+        const teamCount = { 1: 0, 2: 0 };
+        for (const sid of activeIds) {
+          const s = localRoom.slots[sid];
+          if ((s.slotMode === 'human' && s.userId) || s.slotMode === 'bot') {
+            teamCount[teamForSlot(sid)] += 1;
+          }
+        }
+        const prefTeam = teamCount[2] < teamCount[1] ? 2 : 1;
+        const chosen = openSlots.find((sid) => teamForSlot(sid) === prefTeam) ?? openSlots[0];
+        localRoom.slots[chosen] = {
+          slot: chosen,
+          team: teamForSlot(chosen),
+          slotMode: 'human',
+          userId: this.getActorId(),
+          username: this.getDisplayName(),
+          friendCode: this.user?.friendCode ?? null,
+          isGuest: !this.user,
+          isBot: false,
+          charId,
+          startPhase: options?.startPhase ?? 1,
+          level: options?.level ?? prog.level,
+          ready: false,
+        };
+        syncLocalRoomLegacy(localRoom);
+        this.currentRoom = localRoom;
+        this.broadcastLocal({ type: 'room:state', room: localRoom });
+        this.emit('roomUpdated', { ...localRoom });
+        return;
+      }
     }
+
+    this.emit(
+      'roomError',
+      'Sem conexão com o servidor para entrar nessa sala.'
+    );
   }
 
   public leaveRoom(): void {
@@ -607,11 +789,19 @@ export class NetworkClient {
   }
 
   public updateRoomConfig(patch: {
+    roomMode?: RoomMode;
+    teamSize?: 1 | 2 | 3;
     p2Mode?: 'human' | 'bot';
+    targetSlot?: FighterSlotId;
+    slotMode?: SlotMode;
     botDifficulty?: AIDifficulty;
     botCharId?: string;
     botStartPhase?: number;
     isPublic?: boolean;
+    mapTheme?: string;
+    rerollSeed?: boolean;
+    fillBots?: boolean;
+    openAllHuman?: boolean;
   }): void {
     if (this.wsConnected) {
       this.sendWs({ type: 'room:config', ...patch });
@@ -619,42 +809,95 @@ export class NetworkClient {
     }
 
     const room = this.currentRoom;
-    if (!room || room.hostId !== this.getActorId()) return;
+    const actor = this.getActorId();
+    if (!room || room.hostId !== actor) return;
+    if (!room.slots) {
+      room.slots = {
+        p1: { ...room.p1, slot: 'p1', team: 1, slotMode: 'human' },
+        p2: { ...room.p2, slot: 'p2', team: 2, slotMode: room.p2.isBot ? 'bot' : 'human' },
+        p3: buildLocalEmptySlot('p3'),
+        p4: buildLocalEmptySlot('p4'),
+        p5: buildLocalEmptySlot('p5'),
+        p6: buildLocalEmptySlot('p6'),
+      };
+    }
+
     if (patch.botDifficulty) room.botDifficulty = patch.botDifficulty;
     if (typeof patch.isPublic === 'boolean') room.isPublic = patch.isPublic;
-    if (patch.p2Mode === 'bot') {
-      room.p2Mode = 'bot';
-      room.p2 = {
-        userId: 'bot',
-        username: `BOT (${room.botDifficulty === 'easy' ? 'Fácil' : room.botDifficulty === 'master' ? 'Mestre' : 'Médio'})`,
-        friendCode: null,
-        isGuest: false,
-        isBot: true,
-        charId: patch.botCharId ?? (room.p2.isBot ? room.p2.charId : 'luffy'),
-        startPhase: patch.botStartPhase ?? room.p1.startPhase,
-        level: room.p1.level,
-        ready: true,
-      };
-    } else if (patch.p2Mode === 'human') {
-      room.p2Mode = 'human';
-      if (room.p2.isBot) {
-        room.p2 = {
-          userId: null,
-          username: 'Aguardando Amigo...',
-          friendCode: null,
-          isGuest: false,
-          isBot: false,
-          charId: 'luffy',
-          startPhase: 1,
-          level: 1,
-          ready: false,
-        };
-      }
-    } else if (room.p2Mode === 'bot') {
-      room.p2.username = `BOT (${room.botDifficulty === 'easy' ? 'Fácil' : room.botDifficulty === 'master' ? 'Mestre' : 'Médio'})`;
-      if (patch.botCharId) room.p2.charId = patch.botCharId;
-      if (patch.botStartPhase) room.p2.startPhase = patch.botStartPhase;
+    if (patch.mapTheme !== undefined) room.mapTheme = patch.mapTheme;
+    if (patch.rerollSeed) room.mapSeed = randomLocalSeed();
+
+    if (patch.roomMode) {
+      room.roomMode = patch.roomMode;
+      room.teamSize = patch.roomMode === 'rumble' ? (Math.max(2, Math.min(3, patch.teamSize ?? room.teamSize ?? 3)) as 2 | 3) : 1;
+      if (!room.mapSeed) room.mapSeed = randomLocalSeed();
+    } else if (patch.teamSize !== undefined && room.roomMode === 'rumble') {
+      room.teamSize = Math.max(2, Math.min(3, patch.teamSize)) as 2 | 3;
     }
+
+    const hostSlotKey = findLocalUserSlot(room, actor) ?? 'p1';
+    const hostSlot = room.slots[hostSlotKey];
+
+    if (patch.fillBots) {
+      for (const sid of getLocalActiveSlots(room)) {
+        const s = room.slots[sid];
+        if ((s.slotMode === 'human' && !s.userId) || s.slotMode === 'closed') {
+          room.slots[sid] = buildLocalBotSlot(sid, room.botDifficulty, undefined, hostSlot.startPhase, hostSlot.level);
+        }
+      }
+    } else if (patch.openAllHuman) {
+      for (const sid of getLocalActiveSlots(room)) {
+        if (sid === hostSlotKey) continue;
+        const s = room.slots[sid];
+        if (s.slotMode === 'bot' || s.slotMode === 'closed') {
+          room.slots[sid] = buildLocalEmptySlot(sid, s.charId);
+        }
+      }
+    }
+
+    if (patch.targetSlot) {
+      const ts = patch.targetSlot;
+      const cur = room.slots[ts];
+      if (cur.userId !== actor) {
+        if (patch.slotMode === 'bot') {
+          room.slots[ts] = buildLocalBotSlot(
+            ts,
+            room.botDifficulty,
+            patch.botCharId ?? cur.charId,
+            patch.botStartPhase ?? cur.startPhase,
+            hostSlot.level
+          );
+        } else if (patch.slotMode === 'human') {
+          room.slots[ts] = buildLocalEmptySlot(ts, cur.charId);
+        } else if (patch.slotMode === 'closed') {
+          room.slots[ts] = buildLocalClosedSlot(ts);
+        }
+      }
+    } else if (patch.p2Mode === 'bot') {
+      room.slots.p2 = buildLocalBotSlot(
+        'p2',
+        room.botDifficulty,
+        patch.botCharId ?? (room.slots.p2.isBot ? room.slots.p2.charId : 'luffy'),
+        patch.botStartPhase ?? hostSlot.startPhase,
+        hostSlot.level
+      );
+    } else if (patch.p2Mode === 'human') {
+      if (room.slots.p2.isBot || room.slots.p2.slotMode === 'closed') {
+        room.slots.p2 = buildLocalEmptySlot('p2');
+      }
+    } else if (room.slots.p2.isBot) {
+      room.slots.p2.charId = patch.botCharId ?? room.slots.p2.charId;
+      if (patch.botStartPhase !== undefined) room.slots.p2.startPhase = patch.botStartPhase;
+    }
+
+    for (const sid of ALL_SLOTS) {
+      const s = room.slots[sid];
+      if (s.slotMode === 'bot' && s.isBot) {
+        s.username = `BOT ${sid.toUpperCase()} (${difficultyLabel(room.botDifficulty)})`;
+      }
+    }
+
+    syncLocalRoomLegacy(room);
     this.broadcastLocal({ type: 'room:state', room });
     this.emit('roomUpdated', { ...room });
   }
@@ -664,7 +907,8 @@ export class NetworkClient {
     startPhase?: number;
     level?: number;
     ready?: boolean;
-    targetSlot?: 'p1' | 'p2';
+    targetSlot?: FighterSlotId;
+    switchTeam?: boolean;
   }): void {
     if (this.wsConnected) {
       this.sendWs({ type: 'room:select', ...patch });
@@ -672,23 +916,60 @@ export class NetworkClient {
     }
 
     const room = this.currentRoom;
-    if (!room) return;
+    if (!room || !room.slots) return;
     const actor = this.getActorId();
+    const mySlotKey = findLocalUserSlot(room, actor);
+
+    if (patch.switchTeam && room.roomMode === 'rumble' && mySlotKey) {
+      const mySlot = room.slots[mySlotKey];
+      const targetTeam = teamForSlot(mySlotKey) === 1 ? 2 : 1;
+      const candidates = getLocalActiveSlots(room).filter((sid) => teamForSlot(sid) === targetTeam);
+      const destKey =
+        candidates.find((sid) => room.slots![sid].slotMode === 'human' && !room.slots![sid].userId) ??
+        candidates.find((sid) => room.slots![sid].slotMode !== 'human');
+      if (!destKey) {
+        this.emit('roomError', 'O outro time já está cheio!');
+        return;
+      }
+      const destSlot = room.slots[destKey];
+      room.slots[destKey] = {
+        ...mySlot,
+        slot: destKey,
+        team: teamForSlot(destKey),
+      };
+      if (destSlot.slotMode === 'bot') {
+        room.slots[mySlotKey] = buildLocalBotSlot(
+          mySlotKey,
+          room.botDifficulty,
+          destSlot.charId,
+          destSlot.startPhase,
+          destSlot.level
+        );
+      } else if (destSlot.slotMode === 'closed') {
+        room.slots[mySlotKey] = buildLocalClosedSlot(mySlotKey);
+      } else {
+        room.slots[mySlotKey] = buildLocalEmptySlot(mySlotKey);
+      }
+      syncLocalRoomLegacy(room);
+      this.broadcastLocal({ type: 'room:state', room });
+      this.emit('roomUpdated', { ...room });
+      return;
+    }
+
     const slot =
-      patch.targetSlot === 'p2' && room.hostId === actor && room.p2Mode === 'bot'
-        ? room.p2
-        : room.p1.userId === actor
-          ? room.p1
-          : room.p2.userId === actor
-            ? room.p2
-            : null;
+      patch.targetSlot && room.hostId === actor && room.slots[patch.targetSlot]?.isBot
+        ? room.slots[patch.targetSlot]
+        : mySlotKey
+          ? room.slots[mySlotKey]
+          : null;
     if (!slot) return;
     if (patch.charId) slot.charId = patch.charId;
     if (patch.startPhase !== undefined) slot.startPhase = patch.startPhase;
     if (patch.level !== undefined) slot.level = patch.level;
-    if (patch.ready !== undefined && slot === room.p2 && !slot.isBot) {
+    if (patch.ready !== undefined && slot.userId !== room.hostId && !slot.isBot) {
       slot.ready = patch.ready;
     }
+    syncLocalRoomLegacy(room);
     this.broadcastLocal({ type: 'room:state', room });
     this.emit('roomUpdated', { ...room });
   }
@@ -709,30 +990,85 @@ export class NetworkClient {
 
     const room = this.currentRoom;
     if (!room || room.hostId !== this.getActorId()) return;
-    if (room.p2Mode === 'human' && (!room.p2.userId || !room.p2.ready)) {
+    const roomMode: RoomMode = room.roomMode === 'rumble' ? 'rumble' : '1v1';
+    const slots = room.slots ?? {
+      p1: { ...room.p1, slot: 'p1' as FighterSlotId, team: 1 as FighterTeam, slotMode: 'human' as SlotMode },
+      p2: { ...room.p2, slot: 'p2' as FighterSlotId, team: 2 as FighterTeam, slotMode: (room.p2.isBot ? 'bot' : 'human') as SlotMode },
+      p3: buildLocalEmptySlot('p3'),
+      p4: buildLocalEmptySlot('p4'),
+      p5: buildLocalEmptySlot('p5'),
+      p6: buildLocalEmptySlot('p6'),
+    };
+    const activeIds = getLocalActiveSlots(room);
+
+    if (roomMode !== 'rumble' && room.p2Mode === 'human' && (!slots.p2.userId || !slots.p2.ready)) {
       this.emit('roomError', 'Aguarde seu amigo ficar pronto ou jogue contra Bot.');
       return;
     }
+
+    const participants: MatchParticipantConfig[] = [];
+    let t1 = 0;
+    let t2 = 0;
+    for (const sid of activeIds) {
+      const s = slots[sid];
+      if (!s || s.slotMode === 'closed') continue;
+      if (s.slotMode === 'human' && !s.userId) continue;
+      if (s.slotMode === 'human' && s.userId && s.userId !== room.hostId && !s.ready) {
+        this.emit('roomError', `Aguarde ${s.username} ficar pronto para iniciar.`);
+        return;
+      }
+      const team = teamForSlot(sid);
+      participants.push({
+        slot: sid,
+        team,
+        userId: s.userId,
+        displayName: s.username,
+        charId: s.charId,
+        startPhase: s.startPhase,
+        level: s.level,
+        isBot: Boolean(s.isBot),
+      });
+      if (team === 1) t1 += 1;
+      else t2 += 1;
+    }
+
+    if (t1 === 0 || t2 === 0) {
+      this.emit('roomError', 'Os dois times precisam ter pelo menos 1 lutador (jogador ou bot)!');
+      return;
+    }
+
     room.status = 'fighting';
+    const p1Leg = participants.find((p) => p.team === 1) ?? participants[0];
+    const p2Leg = participants.find((p) => p.team === 2) ?? participants[1] ?? p1Leg;
+    const hostSlot = findLocalUserSlot(room, room.hostId) ?? 'p1';
+    const hasRemoteHuman = participants.some((p) => !p.isBot && p.userId !== room.hostId);
+
     const config: MatchConfig = {
-      p1CharId: room.p1.charId,
-      p2CharId: room.p2.charId,
-      p1StartPhase: room.p1.startPhase,
-      p2StartPhase: room.p2.startPhase,
-      p1Level: room.p1.level,
-      p2Level: room.p2.level,
-      p1DisplayName: room.p1.username,
-      p2DisplayName: room.p2.username,
+      p1CharId: p1Leg.charId,
+      p2CharId: p2Leg.charId,
+      p1StartPhase: p1Leg.startPhase,
+      p2StartPhase: p2Leg.startPhase,
+      p1Level: p1Leg.level,
+      p2Level: p2Leg.level,
+      p1DisplayName: p1Leg.displayName,
+      p2DisplayName: p2Leg.displayName,
       difficulty: room.botDifficulty,
-      mode: room.p2Mode === 'bot' ? 'room-bot' : 'online',
-      localSlot: 'p1',
+      mode: hasRemoteHuman ? 'online' : 'room-bot',
+      roomMode,
+      teamSize: room.teamSize ?? (roomMode === 'rumble' ? 3 : 1),
+      mapSeed: room.mapSeed ?? randomLocalSeed(),
+      mapTheme: room.mapTheme ?? 'random',
+      localSlot: hostSlot,
+      hostSlot,
       roomCode: room.code,
+      participants,
     };
-    if (room.p2Mode === 'human') {
+
+    if (hasRemoteHuman) {
       this.broadcastLocal({
         type: 'match:start',
         roomCode: room.code,
-        matchConfig: { ...config, localSlot: 'p2' },
+        matchConfig: config,
       });
     }
     this.emit('matchStart', config);
@@ -902,6 +1238,14 @@ export class NetworkClient {
         );
         break;
       }
+
+      case 'match:player_left': {
+        this.emit('playerLeft', {
+          slot: (msg.slot as FighterSlotId) || 'p2',
+          username: String(msg.username || 'Jogador'),
+        });
+        break;
+      }
     }
   }
 
@@ -1027,7 +1371,12 @@ export class NetworkClient {
         this.currentRoom.code === msg.roomCode &&
         this.currentRoom.hostId !== this.getActorId()
       ) {
-        this.emit('matchStart', msg.matchConfig as MatchConfig);
+        const cfg = msg.matchConfig as MatchConfig;
+        const myParticipant = cfg.participants?.find((p) => p.userId === this.getActorId());
+        this.emit('matchStart', {
+          ...cfg,
+          localSlot: myParticipant?.slot ?? 'p2',
+        });
       } else if (
         msg.type === 'match:sync' &&
         this.currentRoom &&

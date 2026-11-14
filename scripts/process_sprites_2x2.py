@@ -3,6 +3,7 @@ import concurrent.futures
 import glob
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -15,8 +16,20 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "public" / "assets" / "characters"
 ICONS_DIR = ROOT / "public" / "icons"
 
+DIRECTIONAL_ATTACK_PATTERNS = [
+    (re.compile(rf"^(?:ataque|atk)_{n}(?:_.*)?_(?:{pat})(?:_|$)"), f"ataque_{n}_{suffix}")
+    for n in range(1, 5)
+    for pat, suffix in (
+        ("diag_?up|diagonal_?up", "diag_up"),
+        ("diag_?down|diagonal_?down", "diag_down"),
+        ("up", "up"),
+        ("down", "down"),
+    )
+]
+
 ACTION_MAP_PATTERNS = [
     (re.compile(r"^idle$"), "idle"),
+    *DIRECTIONAL_ATTACK_PATTERNS,
     (re.compile(r"^(?:ataque|atk)_1(?:_|$)"), "ataque_1"),
     (re.compile(r"^(?:ataque|atk)_2(?:_|$)"), "ataque_2"),
     (re.compile(r"^(?:ataque|atk)_3(?:_|$)"), "ataque_3"),
@@ -534,20 +547,178 @@ def process_sheet_task(task: dict) -> dict:
     }
 
 
+DIRECTIONAL_ANGLES_CCW = {
+    "up": 74.0,
+    "diag_up": 35.0,
+    "diag_down": -35.0,
+    "down": -74.0,
+}
+
+DIRECTIONAL_FRAME_ANGLE_MULT = (0.72, 1.0, 1.07, 0.80)
+
+
+def _compute_phase_ref_size(phase_data: dict) -> tuple[int, int]:
+    idle_frames = phase_data["actions"].get("idle", [])
+    if idle_frames:
+        ref_f = idle_frames[0]
+        raw_ref_h = max(1, ref_f["rawH"])
+        quad_h = ref_f.get("quadH", raw_ref_h)
+        ref_h = min(raw_ref_h, round(quad_h * 0.79)) if quad_h >= 420 else raw_ref_h
+        ref_w = max(1, ref_f["rawW"])
+        return ref_w, ref_h
+    return 260, 350
+
+
+def _synthesize_directional_task(task: dict) -> dict:
+    char_id = task["char_id"]
+    phase_key = task["phase_key"]
+    base_action = task["base_action"]
+    dir_suffix = task["dir_suffix"]
+    target_action = f"{base_action}_{dir_suffix}"
+    base_frames = task["base_frames"]
+    ref_h = task["ref_h"]
+
+    out_folder = OUT_DIR / char_id / phase_key / target_action
+    out_folder.mkdir(parents=True, exist_ok=True)
+
+    base_angle = DIRECTIONAL_ANGLES_CCW[dir_suffix]
+    frames_meta = []
+
+    for idx, bf in enumerate(base_frames, start=1):
+        src_path = ROOT / "public" / bf["src"].lstrip("/")
+        base_img = Image.open(src_path).convert("RGBA")
+        bw, bh = base_img.size
+
+        margin = 10
+        work = Image.new("RGBA", (bw + margin * 2, bh + margin * 2), (0, 0, 0, 0))
+        work.paste(base_img, (margin, margin))
+
+        peak_scale = 1.04 if (idx == 3 and base_action in ("ataque_3", "ataque_4")) else 1.0
+        if peak_scale != 1.0:
+            new_sz = (max(1, round(work.width * peak_scale)), max(1, round(work.height * peak_scale)))
+            work = work.convert("RGBa").resize(new_sz, Image.Resampling.BICUBIC).convert("RGBA")
+
+        W, H = work.size
+        scx, scy = W * 0.5, H * 0.5
+        base_ax = max(bw * 0.12, min(bw * 0.88, float(bf.get("bodyCenterX", bf.get("anchorX", bw * 0.5)))))
+        base_ay = float(bf["bboxInQuad"][3] - bf["cropOrigin"][1])
+
+        torso_src_x = (base_ax + margin) * peak_scale
+        torso_src_y = (bh * 0.48 + margin) * peak_scale
+
+        angle_mult = DIRECTIONAL_FRAME_ANGLE_MULT[min(idx - 1, 3)]
+        angle_deg = base_angle * angle_mult
+
+        rot = work.convert("RGBa").rotate(
+            angle_deg, resample=Image.Resampling.BICUBIC, expand=True
+        ).convert("RGBA")
+
+        nW, nH = rot.size
+        dcx, dcy = nW * 0.5, nH * 0.5
+        rad = math.radians(angle_deg)
+        c, sn = math.cos(rad), math.sin(rad)
+
+        dx_t = torso_src_x - scx
+        dy_t = torso_src_y - scy
+        rot_torso_x = dcx + dx_t * c + dy_t * sn
+        rot_torso_y = dcy - dx_t * sn + dy_t * c
+
+        alpha_band = rot.getchannel("A")
+        mask = alpha_band.point(lambda p: 255 if p > 18 else 0)
+        bbox = mask.getbbox()
+        if not bbox:
+            bbox = (0, 0, nW, nH)
+
+        pad = 2
+        x0 = max(0, bbox[0] - pad)
+        y0 = max(0, bbox[1] - pad)
+        x1 = min(nW, bbox[2] + pad)
+        y1 = min(nH, bbox[3] + pad)
+        cropped = rot.crop((x0, y0, x1, y1))
+
+        out_file = out_folder / f"frame_{idx}.webp"
+        cropped.save(out_file, format="WEBP", quality=88, method=4)
+
+        cw, ch = cropped.size
+        quad_h = bf.get("quadH", max(ch, bh))
+        t_x = rot_torso_x - x0
+        t_y = rot_torso_y - y0
+        by1_rel = float(bbox[3] - y0)
+        body_cx = _compute_body_center_x(cropped, quad_h)
+
+        ax_mix = (0.65 * t_x + 0.35 * body_cx) if dir_suffix in ("up", "down") else (0.45 * t_x + 0.55 * body_cx)
+        anchor_x = round(max(cw * 0.14, min(cw * 0.86, ax_mix)), 1)
+
+        if dir_suffix in ("up", "diag_up"):
+            anchor_y = round(min(float(ch), max(ch * 0.65, by1_rel)), 1)
+        else:
+            torso_foot_offset = (0.48 if dir_suffix == "diag_down" else 0.45) * ref_h
+            ideal_ay = t_y + torso_foot_offset
+            min_ay = ch * (0.50 if dir_suffix == "diag_down" else 0.38)
+            max_ay = min(float(ch - 1), by1_rel)
+            anchor_y = round(max(min_ay, min(max_ay, ideal_ay)), 1)
+
+        rel_path = "/" + out_file.relative_to(ROOT / "public").as_posix()
+        frames_meta.append({
+            "src": rel_path,
+            "w": cw,
+            "h": ch,
+            "quadW": bf.get("quadW", cw),
+            "quadH": quad_h,
+            "bboxInQuad": [bbox[0], bbox[1], bbox[2], bbox[3]],
+            "cropOrigin": [x0, y0],
+            "rawW": bbox[2] - bbox[0],
+            "rawH": bbox[3] - bbox[1],
+            "anchorX": anchor_x,
+            "anchorY": anchor_y,
+        })
+
+    return {
+        "char_id": char_id,
+        "phase_key": phase_key,
+        "target_action": target_action,
+        "frames": frames_meta,
+    }
+
+
+def synthesize_directional_attacks(characters: dict, workers: int) -> int:
+    """Gera sprites WebP direcionais (up, diag_up, diag_down, down) a partir de ataque_1..4."""
+    synth_tasks = []
+    for char_id, cdata in characters.items():
+        for phase_key, pdata in cdata["phases"].items():
+            actions = pdata["actions"]
+            _, ref_h = _compute_phase_ref_size(pdata)
+            for base_action in ("ataque_1", "ataque_2", "ataque_3", "ataque_4"):
+                base_frames = actions.get(base_action)
+                if not base_frames:
+                    continue
+                for dir_suffix in ("up", "diag_up", "diag_down", "down"):
+                    target_action = f"{base_action}_{dir_suffix}"
+                    if target_action in actions and len(actions[target_action]) > 0:
+                        continue
+                    synth_tasks.append({
+                        "char_id": char_id,
+                        "phase_key": phase_key,
+                        "base_action": base_action,
+                        "dir_suffix": dir_suffix,
+                        "base_frames": base_frames,
+                        "ref_h": ref_h,
+                    })
+
+    if not synth_tasks:
+        return 0
+
+    print(f"Gerando {len(synth_tasks)} conjuntos direcionais de ataque ({len(synth_tasks) * 4} quadros max) em paralelo...")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
+        for res in ex.map(_synthesize_directional_task, synth_tasks):
+            characters[res["char_id"]]["phases"][res["phase_key"]]["actions"][res["target_action"]] = res["frames"]
+    return len(synth_tasks)
+
+
 def compute_anchors(manifest_chars: dict):
     for char_id, char_data in manifest_chars.items():
         for phase_key, phase_data in char_data["phases"].items():
-            idle_frames = phase_data["actions"].get("idle", [])
-            if idle_frames:
-                ref_f = idle_frames[0]
-                raw_ref_h = max(1, ref_f["rawH"])
-                quad_h = ref_f.get("quadH", raw_ref_h)
-                # Normaliza aura alta (quadH=448 no Goku F2..F4) para manter a altura física do corpo
-                ref_h = min(raw_ref_h, round(quad_h * 0.79)) if quad_h >= 420 else raw_ref_h
-                ref_w = max(1, ref_f["rawW"])
-            else:
-                ref_w = 260
-                ref_h = 350
+            ref_w, ref_h = _compute_phase_ref_size(phase_data)
 
             phase_data["refBodyHeight"] = ref_h
             phase_data["refBodyWidth"] = ref_w
@@ -555,12 +726,23 @@ def compute_anchors(manifest_chars: dict):
             # Calcula anchorX e anchorY relativos à imagem recortada (cropOrigin)
             for action, frames in phase_data["actions"].items():
                 for f in frames:
+                    if "anchorX" in f and "anchorY" in f:
+                        f.pop("bodyCenterX", None)
+                        continue
                     by1 = f["bboxInQuad"][3]
                     cy0 = f["cropOrigin"][1]
                     fw = max(1, f["w"])
+                    fh = max(1, f["h"])
                     body_cx = f.pop("bodyCenterX", fw * 0.5)
                     f["anchorX"] = round(max(fw * 0.12, min(fw * 0.88, body_cx)), 1)
-                    f["anchorY"] = round(by1 - cy0, 1)
+                    if action.endswith("_down") or action.endswith("_diag_down"):
+                        cy_mid = fh * 0.48
+                        ratio = 0.45 if action.endswith("_down") else 0.48
+                        min_ay = fh * (0.38 if action.endswith("_down") else 0.50)
+                        max_ay = float(by1 - cy0)
+                        f["anchorY"] = round(max(min_ay, min(max_ay, cy_mid + ratio * ref_h)), 1)
+                    else:
+                        f["anchorY"] = round(by1 - cy0, 1)
 
             for vfx_action, frames in phase_data["vfx"].items():
                 for f in frames:
@@ -681,13 +863,14 @@ def main():
             pdata["vfx"][res["action"]] = res["frames"]
         else:
             pdata["actions"][res["action"]] = res["frames"]
-            if res["action"].startswith("ataque_"):
+            if re.match(r"^ataque_[1-4]$", res["action"]):
                 pdata["moves"][res["action"]] = res["move_label"]
 
     # Ordena fases 1..4
     for cid, cdata in characters.items():
         cdata["phases"] = dict(sorted(cdata["phases"].items(), key=lambda kv: kv[1]["phase"]))
 
+    synthesize_directional_attacks(characters, workers)
     compute_anchors(characters)
     generate_pwa_icons(characters)
 

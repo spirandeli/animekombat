@@ -4,12 +4,26 @@ import { FighterInputState, InputManager } from '../engine/InputManager';
 import { SpriteLoader } from '../engine/SpriteLoader';
 import type {
   CombatEventPayload,
+  MatchParticipantConfig,
   NetworkClient,
   RemoteFighterSyncPayload,
 } from '../net/NetworkClient';
 import { VirtualControls } from '../ui/VirtualControls';
 import { AIController, AIDifficulty } from './AIController';
-import { ATTACK_SPECS, Fighter } from './Fighter';
+import {
+  GeneratedArenaMap,
+  generateArenaMap,
+  preloadArenaBackground,
+  renderArenaWorld,
+  renderThemeBackground,
+} from './ArenaMap';
+import {
+  ATTACK_SPECS,
+  Fighter,
+  FighterSlotId,
+  FighterTeam,
+  teamForSlot,
+} from './Fighter';
 
 export interface MatchConfig {
   p1CharId: string;
@@ -22,18 +36,27 @@ export interface MatchConfig {
   p2DisplayName?: string;
   difficulty: AIDifficulty;
   mode?: 'solo' | 'room-bot' | 'online';
-  localSlot?: 'p1' | 'p2';
+  roomMode?: '1v1' | 'rumble';
+  teamSize?: 1 | 2 | 3;
+  mapSeed?: number;
+  mapTheme?: string;
+  localSlot?: FighterSlotId;
+  hostSlot?: FighterSlotId;
   roomCode?: string;
+  participants?: MatchParticipantConfig[];
 }
 
 export interface MatchEndReport {
   winner: 'p1' | 'p2' | 'draw';
+  winnerTeam?: 1 | 2 | 'draw';
+  localWon?: boolean;
   p1HpRemaining: number;
   p2HpRemaining: number;
   p1FinalPhase: number;
   p2FinalPhase: number;
   xpEarned: number;
-  localSlot: 'p1' | 'p2';
+  localSlot: FighterSlotId;
+  roomMode?: '1v1' | 'rumble';
   mode: 'solo' | 'room-bot' | 'online';
   opponentLeft?: boolean;
 }
@@ -70,6 +93,16 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
+interface RumbleSlotHudRefs {
+  card: HTMLElement;
+  hpFill: HTMLElement;
+  hpTrail: HTMLElement;
+  phaseBadge: HTMLElement;
+  kiFill?: HTMLElement;
+  evoFill?: HTMLElement;
+  evoReady?: HTMLElement;
+}
+
 export class ArenaScene {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
@@ -80,25 +113,37 @@ export class ArenaScene {
   private readonly virtualControls: VirtualControls;
   private readonly audio: AudioManager;
   private readonly combat = new CombatSystem();
-  private readonly ai = new AIController('medium');
+  private difficulty: AIDifficulty = 'medium';
+
+  private fighters: Fighter[] = [];
+  private fightersBySlot = new Map<FighterSlotId, Fighter>();
+  private botSlots = new Set<FighterSlotId>();
+  private aiControllers = new Map<FighterSlotId, AIController>();
+  private remoteInputs = new Map<FighterSlotId, FighterInputState>();
+  private lastRemoteSeqBySlot = new Map<FighterSlotId, number>();
+  private seqBySlot = new Map<FighterSlotId, number>();
+  private lastSentStateBySlot = new Map<FighterSlotId, string>();
 
   private p1: Fighter | null = null;
   private p2: Fighter | null = null;
+
   private active = false;
   private matchEnded = false;
   private koSlowMoTimer = 0;
   private roundTimer = 99;
   private pendingWinner: 'p1' | 'p2' | 'draw' | null = null;
+  private pendingWinnerTeam: 1 | 2 | 'draw' | null = null;
 
   private matchMode: 'solo' | 'room-bot' | 'online' = 'solo';
-  private localSlot: 'p1' | 'p2' = 'p1';
+  private roomMode: '1v1' | 'rumble' = '1v1';
+  private localSlot: FighterSlotId = 'p1';
+  private hostSlot: FighterSlotId = 'p1';
   private opponentLeftFlag = false;
   private net?: NetworkClient;
   private syncTimer = 0;
-  private syncSeq = 0;
-  private lastRemoteSeq = -1;
-  private lastSentState = 'idle';
-  private remoteInput: FighterInputState = createEmptyInput();
+  private botSyncTimer = 0;
+
+  private arenaMap: GeneratedArenaMap = generateArenaMap(1337, false);
 
   private camX = 640;
   private camY = 390;
@@ -112,16 +157,13 @@ export class ArenaScene {
   private onPauseRequested?: () => void;
   private onMatchEnded?: (report: MatchEndReport) => void;
 
-  // Referências rápidas aos elementos da HUD (evita innerHTML a cada frame)
   private hudRefs: {
-    p1Name?: HTMLElement;
     p1Phase?: HTMLElement;
     p1HpFill?: HTMLElement;
     p1HpTrail?: HTMLElement;
     p1KiFill?: HTMLElement;
     p1EvoFill?: HTMLElement;
     p1EvoReady?: HTMLElement;
-    p2Name?: HTMLElement;
     p2Phase?: HTMLElement;
     p2HpFill?: HTMLElement;
     p2HpTrail?: HTMLElement;
@@ -132,6 +174,7 @@ export class ArenaScene {
     p1Combo?: HTMLElement;
     p2Combo?: HTMLElement;
     fps?: HTMLElement;
+    rumbleSlots?: Map<FighterSlotId, RumbleSlotHudRefs>;
   } = {};
 
   constructor(
@@ -183,53 +226,70 @@ export class ArenaScene {
     this.canvas.height = Math.floor(h * dpr);
   };
 
+  private isHostAuthority(): boolean {
+    return this.matchMode !== 'online' || this.localSlot === this.hostSlot;
+  }
+
+  private getLocalFighter(): Fighter | null {
+    return this.fightersBySlot.get(this.localSlot) ?? this.p1;
+  }
+
   public startMatch(config: MatchConfig): void {
     this.combat.clearAll();
-    this.ai.setDifficulty(config.difficulty);
+    this.difficulty = config.difficulty;
 
     this.matchMode = config.mode ?? 'solo';
+    this.roomMode = config.roomMode === 'rumble' ? 'rumble' : '1v1';
     this.localSlot = config.localSlot ?? 'p1';
+    this.hostSlot = config.hostSlot ?? 'p1';
     this.opponentLeftFlag = false;
     this.syncTimer = 0;
-    this.syncSeq = 0;
-    this.lastRemoteSeq = -1;
-    this.lastSentState = 'idle';
-    this.remoteInput = createEmptyInput();
+    this.botSyncTimer = 0;
 
-    const p1Char = this.spriteLoader.getCharacter(config.p1CharId);
-    const p2Char = this.spriteLoader.getCharacter(config.p2CharId);
-    const p1Pack = this.spriteLoader.getCachedPhase(config.p1CharId, config.p1StartPhase);
-    const p2Pack = this.spriteLoader.getCachedPhase(config.p2CharId, config.p2StartPhase);
+    this.fighters = [];
+    this.fightersBySlot.clear();
+    this.botSlots.clear();
+    this.aiControllers.clear();
+    this.remoteInputs.clear();
+    this.lastRemoteSeqBySlot.clear();
+    this.seqBySlot.clear();
+    this.lastSentStateBySlot.clear();
 
-    if (!p1Char || !p2Char || !p1Pack || !p2Pack) {
-      throw new Error('Pacotes de sprites iniciais não foram pré-carregados.');
-    }
+    const seed = config.mapSeed ?? ((Math.floor(Math.random() * 0x7fffffff) >>> 0) || 1337);
+    this.arenaMap = generateArenaMap(seed, this.roomMode === 'rumble', config.mapTheme);
+    preloadArenaBackground(this.arenaMap.themeId);
 
-    const p1Name = config.p1DisplayName || p1Char.name;
-    const p2Name = config.p2DisplayName || p2Char.name;
-
-    this.p1 = new Fighter(
-      'p1',
-      config.p1CharId,
-      p1Name,
-      440,
-      1,
-      config.p1StartPhase,
-      config.p1Level,
-      p1Pack,
-      this.spriteLoader
-    );
-    this.p2 = new Fighter(
-      'p2',
-      config.p2CharId,
-      p2Name,
-      840,
-      -1,
-      config.p2StartPhase,
-      config.p2Level ?? Math.max(1, config.p1Level),
-      p2Pack,
-      this.spriteLoader
-    );
+    const participants: MatchParticipantConfig[] =
+      config.participants && config.participants.length >= 2
+        ? config.participants
+        : [
+            {
+              slot: 'p1',
+              team: 1,
+              userId: 'local',
+              displayName:
+                config.p1DisplayName ||
+                this.spriteLoader.getCharacter(config.p1CharId)?.name ||
+                config.p1CharId,
+              charId: config.p1CharId,
+              startPhase: config.p1StartPhase,
+              level: config.p1Level,
+              isBot: false,
+            },
+            {
+              slot: 'p2',
+              team: 2,
+              userId: this.matchMode === 'online' ? 'remote' : 'bot',
+              displayName:
+                config.p2DisplayName ||
+                this.spriteLoader.getCharacter(config.p2CharId)?.name ||
+                config.p2CharId,
+              charId: config.p2CharId,
+              startPhase: config.p2StartPhase,
+              level: config.p2Level ?? Math.max(1, config.p1Level),
+              isBot: this.matchMode !== 'online',
+            },
+          ];
 
     const wireFighter = (f: Fighter) => {
       f.setCallbacks({
@@ -252,7 +312,6 @@ export class ArenaScene {
           if (evolvedFighter.slot === this.localSlot) {
             this.virtualControls.vibrate([30, 40, 60]);
           }
-          // Pré-carrega em segundo plano a próxima fase se houver
           if (newPhase < 4) {
             void this.spriteLoader.loadPhasePack(evolvedFighter.charId, newPhase + 1);
           }
@@ -263,8 +322,64 @@ export class ArenaScene {
       });
     };
 
-    wireFighter(this.p1);
-    wireFighter(this.p2);
+    let t1Idx = 0;
+    let t2Idx = 0;
+
+    for (const p of participants) {
+      const charDef = this.spriteLoader.getCharacter(p.charId);
+      const pack = this.spriteLoader.getCachedPhase(p.charId, p.startPhase);
+      if (!charDef || !pack) {
+        throw new Error(`Pacote de sprites iniciais não carregado para ${p.charId} F${p.startPhase}.`);
+      }
+
+      const team: FighterTeam = p.team ?? teamForSlot(p.slot);
+      const pool = team === 1 ? this.arenaMap.spawnPoints.team1 : this.arenaMap.spawnPoints.team2;
+      const idx = team === 1 ? t1Idx++ : t2Idx++;
+      const spawn = pool[idx % pool.length];
+      const facing: 1 | -1 = team === 1 ? 1 : -1;
+
+      const fighter = new Fighter(
+        p.slot,
+        p.charId,
+        p.displayName || charDef.name,
+        spawn.x,
+        facing,
+        p.startPhase,
+        p.level,
+        pack,
+        this.spriteLoader,
+        team,
+        spawn.y
+      );
+      fighter.arenaLeft = this.arenaMap.arenaLeft;
+      fighter.arenaRight = this.arenaMap.arenaRight;
+      fighter.groundY = this.arenaMap.groundY;
+
+      wireFighter(fighter);
+      this.fighters.push(fighter);
+      this.fightersBySlot.set(p.slot, fighter);
+      this.remoteInputs.set(p.slot, createEmptyInput());
+
+      if (p.isBot) {
+        this.botSlots.add(p.slot);
+        this.aiControllers.set(p.slot, new AIController(this.difficulty));
+      }
+
+      if (p.startPhase < 4) {
+        void this.spriteLoader.loadPhasePack(p.charId, p.startPhase + 1);
+      }
+    }
+
+    this.p1 =
+      this.fightersBySlot.get('p1') ??
+      this.fighters.find((f) => f.team === 1) ??
+      this.fighters[0] ??
+      null;
+    this.p2 =
+      this.fightersBySlot.get('p2') ??
+      this.fighters.find((f) => f.team === 2) ??
+      this.fighters[1] ??
+      null;
 
     this.combat.setEvents({
       onHitImpact: (_attacker, _defender, _dmg, blocked, isHeavy) => {
@@ -277,7 +392,8 @@ export class ArenaScene {
         }
       },
       onComboUpdate: (slot, count) => {
-        if (slot === 'p1') {
+        const f = this.fightersBySlot.get(slot);
+        if (!f || f.team === 1) {
           this.p1ComboDisplay = count;
           this.p1ComboFade = 1.4;
         } else {
@@ -287,22 +403,24 @@ export class ArenaScene {
       },
     });
 
-    // Pré-carrega em background a fase seguinte de ambos os lutadores para transição instantânea
-    if (config.p1StartPhase < 4) {
-      void this.spriteLoader.loadPhasePack(config.p1CharId, config.p1StartPhase + 1);
-    }
-    if (config.p2StartPhase < 4) {
-      void this.spriteLoader.loadPhasePack(config.p2CharId, config.p2StartPhase + 1);
-    }
-
     this.active = true;
     this.matchEnded = false;
     this.pendingWinner = null;
+    this.pendingWinnerTeam = null;
     this.koSlowMoTimer = 0;
-    this.roundTimer = 99;
-    this.camX = 640;
-    this.camY = 390;
-    this.camZoom = 1.05;
+    this.roundTimer = this.roomMode === 'rumble' ? 150 : 99;
+
+    const local = this.getLocalFighter();
+    if (this.roomMode === 'rumble') {
+      this.camX = local ? local.x : this.arenaMap.width * 0.5;
+      this.camY = 360;
+      this.camZoom = 0.82;
+    } else {
+      this.camX = 640;
+      this.camY = 390;
+      this.camZoom = 1.05;
+    }
+
     this.p1ComboFade = 0;
     this.p2ComboFade = 0;
 
@@ -317,6 +435,11 @@ export class ArenaScene {
     this.active = false;
     this.p1 = null;
     this.p2 = null;
+    this.fighters = [];
+    this.fightersBySlot.clear();
+    this.botSlots.clear();
+    this.aiControllers.clear();
+    this.remoteInputs.clear();
     this.combat.clearAll();
     this.hudEl.classList.add('hidden');
     this.hudEl.setAttribute('aria-hidden', 'true');
@@ -329,12 +452,16 @@ export class ArenaScene {
   }
 
   public applyRemoteSync(payload: RemoteFighterSyncPayload): void {
-    if (!this.active || !this.p1 || !this.p2 || this.matchMode !== 'online') return;
-    if (payload.slot === this.localSlot || payload.seq <= this.lastRemoteSeq) return;
-    this.lastRemoteSeq = payload.seq;
+    if (!this.active || this.matchMode !== 'online') return;
+    if (payload.slot === this.localSlot) return;
+    if (this.isHostAuthority() && this.botSlots.has(payload.slot)) return;
 
-    const remote = payload.slot === 'p1' ? this.p1 : this.p2;
-    const local = this.localSlot === 'p1' ? this.p1 : this.p2;
+    const prevSeq = this.lastRemoteSeqBySlot.get(payload.slot) ?? -1;
+    if (payload.seq <= prevSeq) return;
+    this.lastRemoteSeqBySlot.set(payload.slot, payload.seq);
+
+    const remote = this.fightersBySlot.get(payload.slot);
+    if (!remote) return;
 
     const dx = payload.x - remote.x;
     const dy = payload.y - remote.y;
@@ -347,48 +474,87 @@ export class ArenaScene {
     remote.ki = payload.ki;
     remote.evoEnergy = payload.evoEnergy;
 
-    // Host (P1) é autoritativo para HP e relógio da rodada
-    if (this.localSlot === 'p2') {
+    // Host é autoritativo para HP de todos e relógio da partida
+    if (!this.isHostAuthority() && payload.slot === this.hostSlot) {
       if (typeof payload.roundTimer === 'number') {
         this.roundTimer = payload.roundTimer;
       }
-      if (typeof payload.peerHp === 'number') {
-        local.hp = payload.peerHp;
+      if (payload.hpMap) {
+        for (const [sid, hpVal] of Object.entries(payload.hpMap)) {
+          const target = this.fightersBySlot.get(sid as FighterSlotId);
+          if (target && typeof hpVal === 'number') {
+            target.hp = hpVal;
+            if (target.hp <= 0) {
+              target.state = 'idle';
+              target.vx = 0;
+            }
+          }
+        }
+      } else {
+        const local = this.getLocalFighter();
+        if (local && typeof payload.peerHp === 'number') {
+          local.hp = payload.peerHp;
+        }
+        remote.hp = payload.hp;
       }
+    } else if (!this.isHostAuthority() && this.botSlots.has(payload.slot)) {
       remote.hp = payload.hp;
+      if (remote.hp <= 0) {
+        remote.state = 'idle';
+        remote.vx = 0;
+      }
     }
 
     if (payload.phase > remote.phase && remote.phase < 4) {
       remote.triggerEvolution();
     }
 
-    if (payload.state !== remote.state) {
+    if (payload.state !== remote.state && remote.hp > 0) {
       if (
         payload.state === 'ataque_1' ||
         payload.state === 'ataque_2' ||
         payload.state === 'ataque_3' ||
         payload.state === 'ataque_4'
       ) {
-        remote.syncRemoteAttack(payload.state);
+        remote.syncRemoteAttack(
+          payload.state,
+          payload.attackDirX,
+          payload.attackDirY
+        );
       } else if (payload.state === 'evolve') {
         remote.triggerEvolution();
       }
     }
 
-    this.remoteInput = { ...payload.input };
+    this.remoteInputs.set(payload.slot, { ...payload.input });
   }
 
   public applyRemoteEvent(ev: CombatEventPayload): void {
-    if (!this.active || !this.p1 || !this.p2 || this.matchMode !== 'online') return;
-    if (ev.kind === 'ko' && ev.winner && this.pendingWinner === null) {
-      if (typeof ev.p1HpRemaining === 'number') this.p1.hp = ev.p1HpRemaining;
-      if (typeof ev.p2HpRemaining === 'number') this.p2.hp = ev.p2HpRemaining;
-      this.triggerKoSequence(ev.winner);
+    if (!this.active || this.matchMode !== 'online') return;
+    if (ev.kind === 'ko' && this.pendingWinner === null) {
+      if (ev.hpRemainingMap) {
+        for (const [sid, hpVal] of Object.entries(ev.hpRemainingMap)) {
+          const f = this.fightersBySlot.get(sid as FighterSlotId);
+          if (f && typeof hpVal === 'number') {
+            f.hp = hpVal;
+          }
+        }
+      } else {
+        if (this.p1 && typeof ev.p1HpRemaining === 'number') this.p1.hp = ev.p1HpRemaining;
+        if (this.p2 && typeof ev.p2HpRemaining === 'number') this.p2.hp = ev.p2HpRemaining;
+      }
+      const winnerTeam =
+        ev.winnerTeam ??
+        (ev.winner === 'p1' ? 1 : ev.winner === 'p2' ? 2 : 'draw');
+      const winner =
+        ev.winner ??
+        (winnerTeam === 1 ? 'p1' : winnerTeam === 2 ? 'p2' : 'draw');
+      this.triggerKoSequence(winner, winnerTeam);
     }
   }
 
   public handleOpponentLeft(): void {
-    if (!this.active || !this.p1 || !this.p2 || this.matchMode !== 'online') return;
+    if (!this.active || this.matchMode !== 'online') return;
     if (this.pendingWinner !== null) return;
     this.opponentLeftFlag = true;
     this.combat.spawnFloatingText(
@@ -398,23 +564,49 @@ export class ArenaScene {
       '#38bdf8',
       1.4
     );
-    this.triggerKoSequence(this.localSlot);
+    const localTeam = this.getLocalFighter()?.team ?? 1;
+    const winner = localTeam === 1 ? 'p1' : 'p2';
+    this.triggerKoSequence(winner, localTeam);
   }
 
-  private consumeRemoteInput(): FighterInputState {
-    const snap = { ...this.remoteInput };
-    // Consome disparos de borda apenas uma vez
-    this.remoteInput.justA1 = false;
-    this.remoteInput.justA2 = false;
-    this.remoteInput.justA3 = false;
-    this.remoteInput.justA4 = false;
-    this.remoteInput.justJump = false;
-    this.remoteInput.justEvolve = false;
+  public handlePlayerLeft(slot: FighterSlotId, username?: string): void {
+    if (!this.active || this.matchMode !== 'online') return;
+    const f = this.fightersBySlot.get(slot);
+    if (f) {
+      f.hp = 0;
+      f.state = 'hitstun';
+      f.hitstunRemaining = 0.4;
+      f.vx = 0;
+      f.vy = 0;
+    }
+    this.combat.spawnFloatingText(
+      this.camX,
+      this.camY - 95,
+      `${username || f?.displayName || slot.toUpperCase()} SAIU!`,
+      '#38bdf8',
+      1.25
+    );
+  }
+
+  private consumeRemoteInput(slot: FighterSlotId): FighterInputState {
+    const existing = this.remoteInputs.get(slot);
+    if (!existing) return createEmptyInput();
+    const snap = { ...existing };
+    existing.justA1 = false;
+    existing.justA2 = false;
+    existing.justA3 = false;
+    existing.justA4 = false;
+    existing.justJump = false;
+    existing.justEvolve = false;
     return snap;
   }
 
-  private triggerKoSequence(winner: 'p1' | 'p2' | 'draw'): void {
+  private triggerKoSequence(
+    winner: 'p1' | 'p2' | 'draw',
+    winnerTeam: 1 | 2 | 'draw'
+  ): void {
     this.pendingWinner = winner;
+    this.pendingWinnerTeam = winnerTeam;
     this.koSlowMoTimer = 1.25;
     this.combat.triggerScreenShake(16, 0.45);
     this.combat.spawnFloatingText(
@@ -428,60 +620,138 @@ export class ArenaScene {
     this.virtualControls.vibrate([60, 40, 100]);
   }
 
+  private buildHpMap(): Partial<Record<FighterSlotId, number>> {
+    const map: Partial<Record<FighterSlotId, number>> = {};
+    for (const f of this.fighters) {
+      map[f.slot] = f.hp;
+    }
+    return map;
+  }
+
+  private sendSyncForFighter(
+    fighter: Fighter,
+    input: FighterInputState,
+    includeHostAuth: boolean
+  ): void {
+    if (!this.net) return;
+    const nextSeq = (this.seqBySlot.get(fighter.slot) ?? 0) + 1;
+    this.seqBySlot.set(fighter.slot, nextSeq);
+    this.lastSentStateBySlot.set(fighter.slot, fighter.state);
+
+    const peer = this.fighters.find((f) => f.slot !== fighter.slot);
+    this.net.sendCombatSync({
+      slot: fighter.slot,
+      seq: nextSeq,
+      x: fighter.x,
+      y: fighter.y,
+      vx: fighter.vx,
+      vy: fighter.vy,
+      facing: fighter.facing,
+      attackDirX: fighter.attackDirX,
+      attackDirY: fighter.attackDirY,
+      grounded: fighter.grounded,
+      hp: fighter.hp,
+      peerHp: includeHostAuth ? peer?.hp : undefined,
+      hpMap: includeHostAuth ? this.buildHpMap() : undefined,
+      roundTimer: includeHostAuth ? this.roundTimer : undefined,
+      ki: fighter.ki,
+      evoEnergy: fighter.evoEnergy,
+      phase: fighter.phase,
+      state: fighter.state,
+      stateTime: fighter.stateTime,
+      hitstunRemaining: fighter.hitstunRemaining,
+      invulnTime: fighter.invulnTime,
+      input,
+    });
+  }
+
   public update(dt: number): void {
-    if (!this.active || !this.p1 || !this.p2) return;
+    const localFighter = this.getLocalFighter();
+    if (!this.active || this.fighters.length < 2 || !localFighter) return;
 
-    const localFighter = this.localSlot === 'p2' ? this.p2 : this.p1;
-    const remoteFighter = this.localSlot === 'p2' ? this.p1 : this.p2;
-
-    // Câmera lenta dramática de K.O. antes de abrir a tela de resultado
     if (this.pendingWinner !== null) {
       this.koSlowMoTimer -= dt;
       const slowDt = dt * 0.28;
-      this.combat.update(slowDt, this.p1, this.p2);
+      this.combat.updateMulti(
+        slowDt,
+        this.fighters,
+        this.arenaMap.arenaLeft,
+        this.arenaMap.arenaRight
+      );
       if (this.koSlowMoTimer <= 0 && !this.matchEnded) {
         this.matchEnded = true;
         this.active = false;
         this.virtualControls.setVisible(false);
         this.audio.stopBgm();
+
+        const winnerTeam =
+          this.pendingWinnerTeam ??
+          (this.pendingWinner === 'p1' ? 1 : this.pendingWinner === 'p2' ? 2 : 'draw');
+        const localWon = winnerTeam === localFighter.team;
+
         this.onMatchEnded?.({
           winner: this.pendingWinner,
-          p1HpRemaining: this.p1.hp,
-          p2HpRemaining: this.p2.hp,
-          p1FinalPhase: this.p1.phase,
-          p2FinalPhase: this.p2.phase,
+          winnerTeam,
+          localWon,
+          p1HpRemaining: this.p1?.hp ?? 0,
+          p2HpRemaining: this.p2?.hp ?? 0,
+          p1FinalPhase: this.p1?.phase ?? 1,
+          p2FinalPhase: this.p2?.phase ?? 1,
           localSlot: this.localSlot,
+          roomMode: this.roomMode,
           mode: this.matchMode,
           opponentLeft: this.opponentLeftFlag,
           xpEarned:
             localFighter.xpEarnedInMatch +
-            (this.pendingWinner === this.localSlot ? 65 : 25),
+            (localWon ? (this.roomMode === 'rumble' ? 85 : 65) : 25),
         });
       }
       return;
     }
 
-    // Relógio da partida
     this.roundTimer = Math.max(0, this.roundTimer - dt);
 
-    const localInput = this.input.sample();
-    const opponentInput =
-      this.matchMode === 'online'
-        ? this.consumeRemoteInput()
-        : this.ai.sample(dt, this.p2, this.p1);
+    const localInput = localFighter.hp > 0 ? this.input.sample() : createEmptyInput();
+    const frameInputs = new Map<FighterSlotId, FighterInputState>();
 
-    const p1Input = this.localSlot === 'p1' ? localInput : opponentInput;
-    const p2Input = this.localSlot === 'p2' ? localInput : opponentInput;
-
-    const stepPhysics = this.combat.update(dt, this.p1, this.p2);
-    if (stepPhysics) {
-      this.p1.update(dt, p1Input, this.p2);
-      this.p2.update(dt, p2Input, this.p1);
+    for (const f of this.fighters) {
+      if (f.slot === this.localSlot) {
+        frameInputs.set(f.slot, localInput);
+      } else if (f.hp <= 0) {
+        frameInputs.set(f.slot, createEmptyInput());
+      } else if (this.botSlots.has(f.slot) && this.isHostAuthority()) {
+        const ai = this.aiControllers.get(f.slot) ?? new AIController(this.difficulty);
+        this.aiControllers.set(f.slot, ai);
+        frameInputs.set(
+          f.slot,
+          ai.sampleMulti(dt, f, this.fighters, this.arenaMap.platforms)
+        );
+      } else {
+        frameInputs.set(f.slot, this.consumeRemoteInput(f.slot));
+      }
     }
 
-    // Envia sincronização em tempo real no modo online (~30Hz + disparos imediatos)
+    const stepPhysics = this.combat.updateMulti(
+      dt,
+      this.fighters,
+      this.arenaMap.arenaLeft,
+      this.arenaMap.arenaRight
+    );
+    if (stepPhysics) {
+      for (const f of this.fighters) {
+        f.update(
+          dt,
+          frameInputs.get(f.slot) ?? createEmptyInput(),
+          this.fighters,
+          this.arenaMap.platforms
+        );
+      }
+    }
+
+    // Sincronização em tempo real online
     if (this.matchMode === 'online' && this.net) {
       this.syncTimer += dt;
+      const lastLocalState = this.lastSentStateBySlot.get(this.localSlot) ?? 'idle';
       const immediate =
         localInput.justA1 ||
         localInput.justA2 ||
@@ -489,59 +759,32 @@ export class ArenaScene {
         localInput.justA4 ||
         localInput.justJump ||
         localInput.justEvolve ||
-        localFighter.state !== this.lastSentState;
+        localFighter.state !== lastLocalState;
 
       if (immediate || this.syncTimer >= 0.033) {
         this.syncTimer = 0;
-        this.lastSentState = localFighter.state;
-        this.net.sendCombatSync({
-          slot: this.localSlot,
-          seq: ++this.syncSeq,
-          x: localFighter.x,
-          y: localFighter.y,
-          vx: localFighter.vx,
-          vy: localFighter.vy,
-          facing: localFighter.facing,
-          grounded: localFighter.grounded,
-          hp: localFighter.hp,
-          peerHp: this.localSlot === 'p1' ? remoteFighter.hp : undefined,
-          roundTimer: this.localSlot === 'p1' ? this.roundTimer : undefined,
-          ki: localFighter.ki,
-          evoEnergy: localFighter.evoEnergy,
-          phase: localFighter.phase,
-          state: localFighter.state,
-          stateTime: localFighter.stateTime,
-          hitstunRemaining: localFighter.hitstunRemaining,
-          invulnTime: localFighter.invulnTime,
-          input: localInput,
-        });
+        this.sendSyncForFighter(localFighter, localInput, this.isHostAuthority());
+      }
+
+      if (this.isHostAuthority() && this.botSlots.size > 0) {
+        this.botSyncTimer += dt;
+        if (this.botSyncTimer >= 0.04) {
+          this.botSyncTimer = 0;
+          for (const botSlot of this.botSlots) {
+            const bot = this.fightersBySlot.get(botSlot);
+            if (!bot) continue;
+            const botInput = frameInputs.get(botSlot) ?? createEmptyInput();
+            this.sendSyncForFighter(bot, botInput, false);
+          }
+        }
       }
     }
 
-    // Fades de combo banner
     this.p1ComboFade = Math.max(0, this.p1ComboFade - dt);
     this.p2ComboFade = Math.max(0, this.p2ComboFade - dt);
 
-    // Atualiza câmera dinâmica
-    const midX = (this.p1.x + this.p2.x) * 0.5;
-    const minY = Math.min(this.p1.y, this.p2.y);
-    const dist = Math.abs(this.p1.x - this.p2.x);
-    const isDramatic =
-      this.p1.state === 'ataque_4' ||
-      this.p2.state === 'ataque_4' ||
-      this.p1.state === 'evolve' ||
-      this.p2.state === 'evolve';
-    const targetZoom = isDramatic
-      ? 1.18
-      : Math.max(0.82, Math.min(1.16, 1.24 - dist / 1450));
-    const targetCamX = Math.max(320, Math.min(960, midX));
-    const targetCamY = Math.max(300, Math.min(415, minY - 125));
+    this.updateCamera(dt, localFighter);
 
-    this.camX += (targetCamX - this.camX) * Math.min(1, dt * 8);
-    this.camY += (targetCamY - this.camY) * Math.min(1, dt * 8);
-    this.camZoom += (targetZoom - this.camZoom) * Math.min(1, dt * 6);
-
-    // Atualiza estado visual dos botões virtuais para o lutador local
     this.virtualControls.updateVisualState(
       {
         a1: localFighter.cooldowns.ataque_1 / ATTACK_SPECS.ataque_1.cooldown,
@@ -559,34 +802,130 @@ export class ArenaScene {
       localFighter.getMoveNames()
     );
 
-    // Verifica K.O. ou fim do tempo (no online, P1 é autoritativo para encerrar o round)
-    const canEvaluateKo = this.matchMode !== 'online' || this.localSlot === 'p1';
-    if (canEvaluateKo && (this.p1.hp <= 0 || this.p2.hp <= 0 || this.roundTimer <= 0)) {
-      let winner: 'p1' | 'p2' | 'draw';
-      if (this.p1.hp <= 0 && this.p2.hp <= 0) {
-        winner = 'draw';
-      } else if (this.p2.hp <= 0) {
-        winner = 'p1';
-      } else if (this.p1.hp <= 0) {
-        winner = 'p2';
-      } else {
-        // Fim do tempo: quem tiver maior porcentagem de HP vence
-        const p1Pct = this.p1.hp / this.p1.maxHp;
-        const p2Pct = this.p2.hp / this.p2.maxHp;
-        winner = Math.abs(p1Pct - p2Pct) < 0.001 ? 'draw' : p1Pct > p2Pct ? 'p1' : 'p2';
-      }
-      if (this.matchMode === 'online') {
-        this.net?.sendCombatEvent({
-          kind: 'ko',
-          slot: 'p1',
-          winner,
-          p1HpRemaining: this.p1.hp,
-          p2HpRemaining: this.p2.hp,
-          p1FinalPhase: this.p1.phase,
-        });
-      }
-      this.triggerKoSequence(winner);
+    if (this.isHostAuthority()) {
+      this.evaluateRoundEnd();
     }
+  }
+
+  private updateCamera(dt: number, localFighter: Fighter): void {
+    if (this.roomMode !== 'rumble' && this.p1 && this.p2) {
+      const midX = (this.p1.x + this.p2.x) * 0.5;
+      const minY = Math.min(this.p1.y, this.p2.y);
+      const dist = Math.abs(this.p1.x - this.p2.x);
+      const isDramatic =
+        this.p1.state === 'ataque_4' ||
+        this.p2.state === 'ataque_4' ||
+        this.p1.state === 'evolve' ||
+        this.p2.state === 'evolve';
+      const targetZoom = isDramatic
+        ? 1.18
+        : Math.max(0.82, Math.min(1.16, 1.24 - dist / 1450));
+      const targetCamX = Math.max(320, Math.min(960, midX));
+      const targetCamY = Math.max(300, Math.min(415, minY - 125));
+
+      this.camX += (targetCamX - this.camX) * Math.min(1, dt * 8);
+      this.camY += (targetCamY - this.camY) * Math.min(1, dt * 8);
+      this.camZoom += (targetZoom - this.camZoom) * Math.min(1, dt * 6);
+      return;
+    }
+
+    // Rumble Arena (2600px + múltiplas plataformas): acompanha jogador local + luta próxima
+    const anchor =
+      localFighter.hp > 0
+        ? localFighter
+        : this.fighters.find((f) => f.hp > 0 && f.team === localFighter.team) ??
+          this.fighters.find((f) => f.hp > 0) ??
+          localFighter;
+
+    const aliveOthers = this.fighters
+      .filter((f) => f.slot !== anchor.slot && f.hp > 0)
+      .sort(
+        (a, b) =>
+          Math.hypot(a.x - anchor.x, a.y - anchor.y) -
+          Math.hypot(b.x - anchor.x, b.y - anchor.y)
+      );
+
+    let focusX = anchor.x;
+    let focusY = anchor.y;
+    let spreadX = 480;
+
+    if (aliveOthers.length > 0) {
+      const nearby = aliveOthers.slice(0, 2).filter((o) => Math.abs(o.x - anchor.x) < 760);
+      if (nearby.length > 0) {
+        let sumX = anchor.x * 2;
+        let sumY = anchor.y * 2;
+        for (const o of nearby) {
+          sumX += o.x;
+          sumY += o.y;
+          spreadX = Math.max(spreadX, Math.abs(o.x - anchor.x));
+        }
+        const denom = 2 + nearby.length;
+        focusX = sumX / denom;
+        focusY = sumY / denom;
+      }
+    }
+
+    const isDramatic =
+      anchor.state === 'ataque_4' || anchor.state === 'evolve';
+    const targetZoom = isDramatic
+      ? 1.04
+      : Math.max(0.64, Math.min(0.98, 1.06 - spreadX / 2150));
+
+    const targetCamX = Math.max(
+      this.arenaMap.arenaLeft + 240,
+      Math.min(this.arenaMap.arenaRight - 240, focusX)
+    );
+    const targetCamY = Math.max(200, Math.min(440, focusY - 120));
+
+    this.camX += (targetCamX - this.camX) * Math.min(1, dt * 7);
+    this.camY += (targetCamY - this.camY) * Math.min(1, dt * 7);
+    this.camZoom += (targetZoom - this.camZoom) * Math.min(1, dt * 5);
+  }
+
+  private evaluateRoundEnd(): void {
+    const team1 = this.fighters.filter((f) => f.team === 1);
+    const team2 = this.fighters.filter((f) => f.team === 2);
+
+    const t1Alive = team1.some((f) => f.hp > 0);
+    const t2Alive = team2.some((f) => f.hp > 0);
+
+    if (t1Alive && t2Alive && this.roundTimer > 0) return;
+
+    let winnerTeam: 1 | 2 | 'draw';
+    if (!t1Alive && !t2Alive) {
+      winnerTeam = 'draw';
+    } else if (!t2Alive) {
+      winnerTeam = 1;
+    } else if (!t1Alive) {
+      winnerTeam = 2;
+    } else {
+      const t1Pct =
+        team1.reduce((acc, f) => acc + Math.max(0, f.hp) / f.maxHp, 0) /
+        Math.max(1, team1.length);
+      const t2Pct =
+        team2.reduce((acc, f) => acc + Math.max(0, f.hp) / f.maxHp, 0) /
+        Math.max(1, team2.length);
+      winnerTeam =
+        Math.abs(t1Pct - t2Pct) < 0.001 ? 'draw' : t1Pct > t2Pct ? 1 : 2;
+    }
+
+    const winner: 'p1' | 'p2' | 'draw' =
+      winnerTeam === 1 ? 'p1' : winnerTeam === 2 ? 'p2' : 'draw';
+
+    if (this.matchMode === 'online' && this.net) {
+      this.net.sendCombatEvent({
+        kind: 'ko',
+        slot: this.hostSlot,
+        winner,
+        winnerTeam,
+        p1HpRemaining: this.p1?.hp ?? 0,
+        p2HpRemaining: this.p2?.hp ?? 0,
+        hpRemainingMap: this.buildHpMap(),
+        p1FinalPhase: this.p1?.phase ?? 1,
+      });
+    }
+
+    this.triggerKoSequence(winner, winnerTeam);
   }
 
   public render(fps: number): void {
@@ -594,8 +933,7 @@ export class ArenaScene {
     const cw = this.canvas.width;
     const ch = this.canvas.height;
 
-    if (!this.active || !this.p1 || !this.p2) {
-      // Fundo animado sutil para os menus
+    if (!this.active || this.fighters.length === 0) {
       this.renderBackdropOnly(ctx, cw, ch);
       return;
     }
@@ -610,8 +948,8 @@ export class ArenaScene {
         ? (Math.random() * 2 - 1) * this.combat.shakeIntensity
         : 0;
 
-    // 1. Céu e Parallax de fundo
-    this.renderParallaxBackground(ctx, cw, ch);
+    // 1. Céu / Plano de fundo temático
+    renderThemeBackground(ctx, cw, ch, this.camX, this.camY, this.arenaMap);
 
     // 2. Mundo da Arena transformado pela câmera
     ctx.save();
@@ -619,16 +957,34 @@ export class ArenaScene {
     ctx.scale(viewScale, viewScale);
     ctx.translate(-this.camX, -this.camY);
 
-    this.renderArenaFloor(ctx);
+    renderArenaWorld(ctx, this.arenaMap);
 
-    // Lutadores e sistema de VFX/combate
-    this.p2.render(ctx);
-    this.p1.render(ctx);
+    // Ordena: nocauteados atrás, lutadores vivos no meio, jogador local por cima
+    const ordered = [...this.fighters].sort((a, b) => {
+      if (a.slot === this.localSlot) return 1;
+      if (b.slot === this.localSlot) return -1;
+      if ((a.hp <= 0) !== (b.hp <= 0)) return a.hp <= 0 ? -1 : 1;
+      return 0;
+    });
+
+    for (const f of ordered) {
+      f.render(ctx, {
+        showOverheadHud: this.roomMode === 'rumble',
+        isLocal: f.slot === this.localSlot,
+        platforms: this.arenaMap.platforms,
+      });
+    }
+
     this.combat.render(ctx);
 
     ctx.restore();
 
-    // 3. Flash de impacto / Ultimate
+    // 3. Indicadores de lutadores fora da tela no Rumble Arena
+    if (this.roomMode === 'rumble') {
+      this.renderOffscreenMarkers(ctx, cw, ch, viewScale);
+    }
+
+    // 4. Flash de impacto / Ultimate
     if (this.combat.flashAlpha > 0) {
       ctx.save();
       ctx.fillStyle = `rgba(255, 255, 255, ${this.combat.flashAlpha.toFixed(3)})`;
@@ -637,6 +993,55 @@ export class ArenaScene {
     }
 
     this.updateHudDom(fps);
+  }
+
+  private renderOffscreenMarkers(
+    ctx: CanvasRenderingContext2D,
+    cw: number,
+    ch: number,
+    viewScale: number
+  ): void {
+    const pad = 34;
+    for (const f of this.fighters) {
+      if (f.hp <= 0) continue;
+      const sx = cw * 0.5 + (f.x - this.camX) * viewScale;
+      const sy = ch * 0.56 + (f.y - 90 - this.camY) * viewScale;
+      if (sx >= 16 && sx <= cw - 16 && sy >= 56 && sy <= ch - 16) continue;
+
+      const mx = Math.max(pad, Math.min(cw - pad, sx));
+      const my = Math.max(92, Math.min(ch - pad, sy));
+      const angle = Math.atan2(sy - my, sx - mx);
+      const color = f.team === 1 ? '#38bdf8' : '#ff4757';
+
+      ctx.save();
+      ctx.translate(mx, my);
+      ctx.fillStyle = 'rgba(8, 12, 26, 0.85)';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Seta direcional
+      ctx.save();
+      ctx.rotate(angle);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(20, 0);
+      ctx.lineTo(12, -5);
+      ctx.lineTo(12, 5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      // Sigla e HP mini
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = '800 9px Orbitron, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(f.slot.toUpperCase(), 0, 3);
+      ctx.restore();
+    }
   }
 
   private renderBackdropOnly(
@@ -651,7 +1056,6 @@ export class ArenaScene {
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, cw, ch);
 
-    // Brilho cel-shaded de energia ao fundo
     const t = performance.now() * 0.001;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
@@ -671,92 +1075,13 @@ export class ArenaScene {
     ctx.restore();
   }
 
-  private renderParallaxBackground(
-    ctx: CanvasRenderingContext2D,
-    cw: number,
-    ch: number
-  ): void {
-    const sky = ctx.createLinearGradient(0, 0, 0, ch);
-    sky.addColorStop(0, '#090e24');
-    sky.addColorStop(0.58, '#261845');
-    sky.addColorStop(1, '#3b1c4a');
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, cw, ch);
-
-    // Lua anime estilizada com parallax lento
-    const offsetCam = (this.camX - 640) * 0.08;
-    const moonX = cw * 0.72 - offsetCam;
-    const moonY = ch * 0.24;
-    const moonR = Math.min(cw, ch) * 0.11;
-    ctx.save();
-    ctx.fillStyle = 'rgba(255, 226, 154, 0.9)';
-    ctx.shadowColor = 'rgba(255, 184, 0, 0.55)';
-    ctx.shadowBlur = 32;
-    ctx.beginPath();
-    ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-
-    // Camada distante de montanhas / templos (parallax 0.2)
-    const p1Off = -(this.camX - 640) * 0.18;
-    ctx.fillStyle = '#15122b';
-    ctx.beginPath();
-    ctx.moveTo(0, ch);
-    const horizon = ch * 0.66;
-    for (let i = -1; i <= 8; i++) {
-      const bx = i * (cw / 6) + (p1Off % (cw / 3));
-      const peak = horizon - ((i * 53) % 75) - 40;
-      ctx.lineTo(bx, peak);
-      ctx.lineTo(bx + cw / 12, horizon - 15);
-    }
-    ctx.lineTo(cw, ch);
-    ctx.closePath();
-    ctx.fill();
-
-    // Camada média de pilares/torres (parallax 0.35)
-    const p2Off = -(this.camX - 640) * 0.34;
-    ctx.fillStyle = '#100d20';
-    for (let i = -1; i <= 9; i++) {
-      const tx = i * (cw / 7) + (p2Off % (cw / 3.5));
-      const tw = cw * 0.065;
-      const th = ch * (0.2 + ((i * 19) % 14) / 100);
-      ctx.fillRect(tx, ch * 0.72 - th, tw, th + ch * 0.3);
-    }
-  }
-
-  private renderArenaFloor(ctx: CanvasRenderingContext2D): void {
-    const gy = Fighter.GROUND_Y;
-
-    // Piso principal
-    const floorGrad = ctx.createLinearGradient(0, gy, 0, gy + 240);
-    floorGrad.addColorStop(0, '#1f2947');
-    floorGrad.addColorStop(0.2, '#13192e');
-    floorGrad.addColorStop(1, '#070912');
-    ctx.fillStyle = floorGrad;
-    ctx.fillRect(-200, gy, 1680, 300);
-
-    // Linha energética de borda da arena
-    ctx.fillStyle = '#38bdf8';
-    ctx.fillRect(-200, gy - 2, 1680, 4);
-
-    // Linhas de perspectiva no chão para sensação de velocidade
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.16)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (let x = 0; x <= 1280; x += 80) {
-      ctx.moveTo(x, gy);
-      ctx.lineTo((x - 640) * 1.45 + 640, gy + 190);
-    }
-    ctx.stroke();
-
-    // Marcadores de limite esquerdo e direito
-    ctx.fillStyle = 'rgba(255, 59, 92, 0.35)';
-    ctx.fillRect(Fighter.ARENA_LEFT - 12, gy - 220, 6, 220);
-    ctx.fillRect(Fighter.ARENA_RIGHT + 6, gy - 220, 6, 220);
-  }
-
   private buildHud(): void {
+    if (this.roomMode === 'rumble') {
+      this.buildRumbleHud();
+      return;
+    }
     if (!this.p1 || !this.p2) return;
+
     const p1Tag =
       this.matchMode === 'online' && this.localSlot === 'p1' ? ' (VOCÊ)' : '';
     const p2Tag =
@@ -817,14 +1142,12 @@ export class ArenaScene {
 
     const q = (sel: string) => this.hudEl.querySelector<HTMLElement>(sel) ?? undefined;
     this.hudRefs = {
-      p1Name: q('#hud-p1-name'),
       p1Phase: q('#hud-p1-phase'),
       p1HpFill: q('#hud-p1-hp-fill'),
       p1HpTrail: q('#hud-p1-hp-trail'),
       p1KiFill: q('#hud-p1-ki'),
       p1EvoFill: q('#hud-p1-evo'),
       p1EvoReady: q('#hud-p1-evo-ready'),
-      p2Name: q('#hud-p2-name'),
       p2Phase: q('#hud-p2-phase'),
       p2HpFill: q('#hud-p2-hp-fill'),
       p2HpTrail: q('#hud-p2-hp-trail'),
@@ -843,58 +1166,174 @@ export class ArenaScene {
     });
   }
 
-  private updateHudDom(fps: number): void {
-    if (!this.p1 || !this.p2) return;
+  private buildRumbleHud(): void {
+    const team1 = this.fighters.filter((f) => f.team === 1);
+    const team2 = this.fighters.filter((f) => f.team === 2);
 
-    const p1HpPct = Math.max(0, (this.p1.hp / this.p1.maxHp) * 100);
-    const p2HpPct = Math.max(0, (this.p2.hp / this.p2.maxHp) * 100);
+    const renderTeamSlot = (f: Fighter) => {
+      const isMe = f.slot === this.localSlot;
+      const tag = isMe ? ' (VOCÊ)' : '';
+      return `
+        <div class="ak-rumble-slot-hud ${isMe ? 'is-local' : ''}" id="hud-rslot-${f.slot}">
+          <div class="ak-rumble-slot-head">
+            <span class="ak-rumble-slot-name">${escapeHtml(f.displayName + tag)}</span>
+            <span class="ak-fase-badge" id="hud-rslot-${f.slot}-phase">F${f.phase}</span>
+          </div>
+          <div class="ak-hp-track ak-hp-track-sm">
+            <div class="ak-hp-trail" id="hud-rslot-${f.slot}-hp-trail" style="width:100%"></div>
+            <div class="ak-hp-fill ${f.team === 2 ? 'p2-fill' : ''}" id="hud-rslot-${f.slot}-hp-fill" style="width:100%"></div>
+          </div>
+          ${
+            isMe
+              ? `<div class="ak-subbars ak-subbars-compact">
+                   <div class="ak-mini-track" title="Ki"><div class="ak-ki-fill" id="hud-rslot-${f.slot}-ki" style="width:45%"></div></div>
+                   <div class="ak-mini-track" title="Evolução"><div class="ak-evo-fill" id="hud-rslot-${f.slot}-evo" style="width:0%"></div></div>
+                   <span class="ak-fase-badge hidden" id="hud-rslot-${f.slot}-evo-ready" style="border-color:#c084fc;background:rgba(168,85,247,0.35);color:#fef08a;">EVO!</span>
+                 </div>`
+              : ''
+          }
+        </div>
+      `;
+    };
 
-    if (this.hudRefs.p1HpFill && this.hudRefs.p1HpTrail) {
-      const w = `${p1HpPct.toFixed(1)}%`;
-      this.hudRefs.p1HpFill.style.width = w;
-      this.hudRefs.p1HpTrail.style.width = w;
-      this.hudRefs.p1HpFill.classList.toggle('danger', p1HpPct < 30);
-    }
-    if (this.hudRefs.p2HpFill && this.hudRefs.p2HpTrail) {
-      const w = `${p2HpPct.toFixed(1)}%`;
-      this.hudRefs.p2HpFill.style.width = w;
-      this.hudRefs.p2HpTrail.style.width = w;
-      this.hudRefs.p2HpFill.classList.toggle('danger', p2HpPct < 30);
-    }
+    this.hudEl.innerHTML = `
+      <div class="ak-hud-top ak-hud-rumble-top">
+        <div class="ak-rumble-team-hud t1">
+          <div class="ak-rumble-team-label blue">TIME AZUL</div>
+          ${team1.map(renderTeamSlot).join('')}
+        </div>
 
-    if (this.hudRefs.p1KiFill) {
-      this.hudRefs.p1KiFill.style.width = `${(this.p1.ki / this.p1.maxKi) * 100}%`;
-    }
-    if (this.hudRefs.p2KiFill) {
-      this.hudRefs.p2KiFill.style.width = `${(this.p2.ki / this.p2.maxKi) * 100}%`;
-    }
-    if (this.hudRefs.p1EvoFill) {
-      const evoW = this.p1.phase >= 4 ? 100 : this.p1.evoEnergy;
-      this.hudRefs.p1EvoFill.style.width = `${evoW}%`;
-    }
-    if (this.hudRefs.p1EvoReady) {
-      const showP1Evo = this.localSlot === 'p1' && this.p1.canEvolveNow();
-      this.hudRefs.p1EvoReady.classList.toggle('hidden', !showP1Evo);
-    }
-    if (this.hudRefs.p2EvoFill) {
-      const evoW = this.p2.phase >= 4 ? 100 : this.p2.evoEnergy;
-      this.hudRefs.p2EvoFill.style.width = `${evoW}%`;
-    }
-    if (this.hudRefs.p2EvoReady) {
-      const showP2Evo = this.localSlot === 'p2' && this.p2.canEvolveNow();
-      this.hudRefs.p2EvoReady.classList.toggle('hidden', !showP2Evo);
-    }
+        <div class="ak-hud-center">
+          <div class="ak-timer-box" id="hud-timer">150</div>
+          <div class="ak-map-tag">${escapeHtml(this.arenaMap.themeName)} · ${escapeHtml(this.arenaMap.archetypeName)}</div>
+          <button type="button" class="ak-pause-btn" id="hud-pause-btn">PAUSA</button>
+        </div>
 
-    if (this.hudRefs.p1Phase) {
-      const target = `F${this.p1.phase} · ${this.p1.phasePack.manifest.label}`;
-      if (this.hudRefs.p1Phase.textContent !== target) {
-        this.hudRefs.p1Phase.textContent = target;
+        <div class="ak-rumble-team-hud t2">
+          <div class="ak-rumble-team-label red">TIME VERMELHO</div>
+          ${team2.map(renderTeamSlot).join('')}
+        </div>
+      </div>
+
+      <div class="ak-combo-banner hidden" id="hud-p1-combo">2 HITS!</div>
+      <div class="ak-combo-banner p2 hidden" id="hud-p2-combo">2 HITS!</div>
+      <div class="ak-fps-tag" id="hud-fps">60 FPS</div>
+    `;
+
+    const rumbleSlots = new Map<FighterSlotId, RumbleSlotHudRefs>();
+    for (const f of this.fighters) {
+      const card = this.hudEl.querySelector<HTMLElement>(`#hud-rslot-${f.slot}`);
+      const hpFill = this.hudEl.querySelector<HTMLElement>(`#hud-rslot-${f.slot}-hp-fill`);
+      const hpTrail = this.hudEl.querySelector<HTMLElement>(`#hud-rslot-${f.slot}-hp-trail`);
+      const phaseBadge = this.hudEl.querySelector<HTMLElement>(`#hud-rslot-${f.slot}-phase`);
+      if (card && hpFill && hpTrail && phaseBadge) {
+        rumbleSlots.set(f.slot, {
+          card,
+          hpFill,
+          hpTrail,
+          phaseBadge,
+          kiFill:
+            this.hudEl.querySelector<HTMLElement>(`#hud-rslot-${f.slot}-ki`) ?? undefined,
+          evoFill:
+            this.hudEl.querySelector<HTMLElement>(`#hud-rslot-${f.slot}-evo`) ?? undefined,
+          evoReady:
+            this.hudEl.querySelector<HTMLElement>(`#hud-rslot-${f.slot}-evo-ready`) ??
+            undefined,
+        });
       }
     }
-    if (this.hudRefs.p2Phase) {
-      const target = `F${this.p2.phase} · ${this.p2.phasePack.manifest.label}`;
-      if (this.hudRefs.p2Phase.textContent !== target) {
-        this.hudRefs.p2Phase.textContent = target;
+
+    const q = (sel: string) => this.hudEl.querySelector<HTMLElement>(sel) ?? undefined;
+    this.hudRefs = {
+      timer: q('#hud-timer'),
+      p1Combo: q('#hud-p1-combo'),
+      p2Combo: q('#hud-p2-combo'),
+      fps: q('#hud-fps'),
+      rumbleSlots,
+    };
+
+    this.hudEl.querySelector('#hud-pause-btn')?.addEventListener('click', () => {
+      this.audio.playSfx('ui');
+      this.onPauseRequested?.();
+    });
+  }
+
+  private updateHudDom(fps: number): void {
+    if (this.roomMode === 'rumble' && this.hudRefs.rumbleSlots) {
+      for (const f of this.fighters) {
+        const refs = this.hudRefs.rumbleSlots.get(f.slot);
+        if (!refs) continue;
+        const hpPct = Math.max(0, (f.hp / f.maxHp) * 100);
+        const w = `${hpPct.toFixed(1)}%`;
+        refs.hpFill.style.width = w;
+        refs.hpTrail.style.width = w;
+        refs.hpFill.classList.toggle('danger', hpPct < 30);
+        refs.card.classList.toggle('is-ko', f.hp <= 0);
+        const phaseTxt = `F${f.phase}`;
+        if (refs.phaseBadge.textContent !== phaseTxt) {
+          refs.phaseBadge.textContent = phaseTxt;
+        }
+        if (refs.kiFill) {
+          refs.kiFill.style.width = `${(f.ki / f.maxKi) * 100}%`;
+        }
+        if (refs.evoFill) {
+          refs.evoFill.style.width = `${f.phase >= 4 ? 100 : f.evoEnergy}%`;
+        }
+        if (refs.evoReady) {
+          refs.evoReady.classList.toggle('hidden', !f.canEvolveNow());
+        }
+      }
+    } else if (this.p1 && this.p2) {
+      const p1HpPct = Math.max(0, (this.p1.hp / this.p1.maxHp) * 100);
+      const p2HpPct = Math.max(0, (this.p2.hp / this.p2.maxHp) * 100);
+
+      if (this.hudRefs.p1HpFill && this.hudRefs.p1HpTrail) {
+        const w = `${p1HpPct.toFixed(1)}%`;
+        this.hudRefs.p1HpFill.style.width = w;
+        this.hudRefs.p1HpTrail.style.width = w;
+        this.hudRefs.p1HpFill.classList.toggle('danger', p1HpPct < 30);
+      }
+      if (this.hudRefs.p2HpFill && this.hudRefs.p2HpTrail) {
+        const w = `${p2HpPct.toFixed(1)}%`;
+        this.hudRefs.p2HpFill.style.width = w;
+        this.hudRefs.p2HpTrail.style.width = w;
+        this.hudRefs.p2HpFill.classList.toggle('danger', p2HpPct < 30);
+      }
+
+      if (this.hudRefs.p1KiFill) {
+        this.hudRefs.p1KiFill.style.width = `${(this.p1.ki / this.p1.maxKi) * 100}%`;
+      }
+      if (this.hudRefs.p2KiFill) {
+        this.hudRefs.p2KiFill.style.width = `${(this.p2.ki / this.p2.maxKi) * 100}%`;
+      }
+      if (this.hudRefs.p1EvoFill) {
+        const evoW = this.p1.phase >= 4 ? 100 : this.p1.evoEnergy;
+        this.hudRefs.p1EvoFill.style.width = `${evoW}%`;
+      }
+      if (this.hudRefs.p1EvoReady) {
+        const showP1Evo = this.localSlot === 'p1' && this.p1.canEvolveNow();
+        this.hudRefs.p1EvoReady.classList.toggle('hidden', !showP1Evo);
+      }
+      if (this.hudRefs.p2EvoFill) {
+        const evoW = this.p2.phase >= 4 ? 100 : this.p2.evoEnergy;
+        this.hudRefs.p2EvoFill.style.width = `${evoW}%`;
+      }
+      if (this.hudRefs.p2EvoReady) {
+        const showP2Evo = this.localSlot === 'p2' && this.p2.canEvolveNow();
+        this.hudRefs.p2EvoReady.classList.toggle('hidden', !showP2Evo);
+      }
+
+      if (this.hudRefs.p1Phase) {
+        const target = `F${this.p1.phase} · ${this.p1.phasePack.manifest.label}`;
+        if (this.hudRefs.p1Phase.textContent !== target) {
+          this.hudRefs.p1Phase.textContent = target;
+        }
+      }
+      if (this.hudRefs.p2Phase) {
+        const target = `F${this.p2.phase} · ${this.p2.phasePack.manifest.label}`;
+        if (this.hudRefs.p2Phase.textContent !== target) {
+          this.hudRefs.p2Phase.textContent = target;
+        }
       }
     }
 

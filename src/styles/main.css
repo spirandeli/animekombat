@@ -1309,6 +1309,284 @@ body {
   text-align: center;
 }
 
+/* ==========================================================
+   Rumble Arena — Criação de Sala, Lobby 3v3 e HUD de Times
+   ========================================================== */
+.ak-room-create-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(9, 13, 28, 0.55);
+  border: 1px solid var(--ak-border);
+}
+
+.ak-theme-pills {
+  flex-wrap: wrap;
+}
+
+.ak-theme-pills .ak-seg-btn {
+  flex: 1 1 135px;
+  font-size: 0.72rem;
+}
+
+.ak-lobby-host-config {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+
+.ak-lobby-host-config .ak-seg-group {
+  flex: 1 1 240px;
+}
+
+.ak-rumble-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(9, 13, 28, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ak-rumble-map-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ak-rumble-toolbar-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ak-rumble-lobby-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ak-rumble-team-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(8, 12, 26, 0.5);
+  border: 1px solid var(--ak-border);
+}
+
+.ak-rumble-team-col.t1 {
+  border-color: rgba(56, 189, 248, 0.4);
+}
+
+.ak-rumble-team-col.t2 {
+  border-color: rgba(255, 59, 92, 0.4);
+}
+
+.ak-team-col-title {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ak-team-col-title.blue {
+  color: #38bdf8;
+}
+
+.ak-team-col-title.red {
+  color: #fb7185;
+}
+
+.ak-rumble-slot-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(15, 22, 42, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.ak-rumble-slot-card.is-me {
+  border-color: rgba(34, 211, 238, 0.72);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.25);
+}
+
+.ak-rumble-slot-card.is-editing {
+  border-color: #facc15;
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.35);
+}
+
+.ak-rumble-slot-card.is-closed {
+  opacity: 0.55;
+}
+
+.ak-slot-player-sm {
+  gap: 8px;
+}
+
+.ak-thumb-sm {
+  width: 38px;
+  height: 38px;
+}
+
+.ak-waiting-slot-sm {
+  padding: 6px 2px;
+  font-size: 0.76rem;
+  color: var(--ak-muted);
+}
+
+.ak-slot-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ak-mini-btn {
+  flex: 1;
+  min-width: 48px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ak-muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.ak-mini-btn.active {
+  background: rgba(34, 211, 238, 0.22);
+  border-color: var(--ak-cyan);
+  color: #e0f2fe;
+}
+
+.ak-mini-btn.edit.active {
+  background: rgba(250, 204, 21, 0.22);
+  border-color: #facc15;
+  color: #fef08a;
+}
+
+/* HUD de Combate — Rumble Arena */
+.ak-hud-rumble-top {
+  gap: 8px;
+}
+
+.ak-rumble-team-hud {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 310px;
+}
+
+.ak-rumble-team-hud.t2 {
+  align-items: flex-end;
+  justify-self: end;
+  width: 100%;
+}
+
+.ak-rumble-team-label {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.64rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+}
+
+.ak-rumble-team-label.blue {
+  color: #38bdf8;
+}
+
+.ak-rumble-team-label.red {
+  color: #fb7185;
+}
+
+.ak-rumble-slot-hud {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px 6px;
+  border-radius: 7px;
+  background: rgba(7, 11, 22, 0.56);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.ak-rumble-slot-hud.is-local {
+  border-color: rgba(250, 204, 21, 0.72);
+  background: rgba(12, 18, 36, 0.76);
+}
+
+.ak-rumble-slot-hud.is-ko {
+  opacity: 0.45;
+  filter: grayscale(0.6);
+}
+
+.ak-rumble-slot-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.ak-rumble-slot-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ak-hp-track-sm {
+  height: 9px;
+  border-radius: 4px;
+  transform: none;
+}
+
+.ak-rumble-team-hud.t2 .ak-hp-fill,
+.ak-rumble-team-hud.t2 .ak-hp-trail {
+  left: auto;
+  right: 0;
+}
+
+.ak-hp-fill.p2-fill {
+  background: linear-gradient(90deg, #fb7185, #f43f5e);
+}
+
+.ak-subbars-compact {
+  width: 100%;
+  margin-top: 1px;
+}
+
+.ak-map-tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(8, 12, 26, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #cbd5e1;
+  font-size: 0.62rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 @media (max-width: 680px) {
   .ak-rooms-actions {
     grid-template-columns: 1fr;
@@ -1316,10 +1594,16 @@ body {
   .ak-lobby-versus {
     grid-template-columns: 1fr;
   }
+  .ak-rumble-lobby-grid {
+    grid-template-columns: 1fr;
+  }
   .ak-vs-pill {
     width: 34px;
     height: 34px;
     font-size: 0.8rem;
+  }
+  .ak-map-tag {
+    display: none;
   }
 }
 
@@ -1330,5 +1614,11 @@ body {
   .ak-lobby-versus {
     gap: 8px;
     margin-top: 8px;
+  }
+  .ak-rumble-slot-hud {
+    padding: 2px 4px;
+  }
+  .ak-hp-track-sm {
+    height: 7px;
   }
 }

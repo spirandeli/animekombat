@@ -178,11 +178,13 @@ export class Fighter {
   public vx = 0;
   public vy = 0;
   public facing: 1 | -1;
+  public attackDirX = 1;
+  public attackDirY = 0;
   public grounded = true;
 
-  public arenaLeft = Fighter.ARENA_LEFT;
-  public arenaRight = Fighter.ARENA_RIGHT;
-  public groundY = Fighter.GROUND_Y;
+  public arenaLeft = 70;
+  public arenaRight = 1210;
+  public groundY = 540;
   public currentPlatformId: string | null = null;
   public dropThroughTimer = 0;
 
@@ -540,10 +542,10 @@ export class Fighter {
     }
 
     // Prioridade de ataques (do Ultimate ao básico)
-    if (input.justA4 && this.tryStartAttack('ataque_4')) return;
-    if (input.justA3 && this.tryStartAttack('ataque_3')) return;
-    if (input.justA2 && this.tryStartAttack('ataque_2')) return;
-    if (input.justA1 && this.tryStartAttack('ataque_1')) return;
+    if (input.justA4 && this.tryStartAttack('ataque_4', input)) return;
+    if (input.justA3 && this.tryStartAttack('ataque_3', input)) return;
+    if (input.justA2 && this.tryStartAttack('ataque_2', input)) return;
+    if (input.justA1 && this.tryStartAttack('ataque_1', input)) return;
 
     // Atravessar plataforma para baixo (Baixo + Pulo)
     if (
@@ -588,7 +590,9 @@ export class Fighter {
 
     // Agachar
     if (this.grounded && input.down) {
-      if (Math.abs(this.lastOpponentX - this.x) > 8) {
+      if (Math.abs(input.moveX) > 0.25) {
+        this.facing = input.moveX > 0 ? 1 : -1;
+      } else if (Math.abs(this.lastOpponentX - this.x) > 8) {
         this.facing = this.lastOpponentX >= this.x ? 1 : -1;
       }
       this.state = 'crouch';
@@ -646,8 +650,10 @@ export class Fighter {
       } else if (!this.vfxSpawned) {
         this.vfxSpawned = true;
         const offsetDist = spec.action === 'ataque_4' ? 115 : 80;
-        const vfxX = this.x + this.facing * offsetDist;
-        const vfxY = this.y + spec.offsetY;
+        const baseChestY =
+          Math.abs(this.attackDirY) < 0.2 ? this.y + spec.offsetY : this.y - 96;
+        const vfxX = this.x + this.attackDirX * offsetDist;
+        const vfxY = baseChestY + this.attackDirY * offsetDist;
         const followOwner = spec.action === 'ataque_2';
         this.callbacks?.onSpawnAttackVfx(this, spec, vfxX, vfxY, followOwner);
       }
@@ -659,9 +665,9 @@ export class Fighter {
       this.attackHitDone &&
       progress >= 0.48
     ) {
-      if (input.justA4 && this.tryStartAttack('ataque_4')) return;
-      if (input.justA3 && this.tryStartAttack('ataque_3')) return;
-      if (input.justA2 && this.tryStartAttack('ataque_2')) return;
+      if (input.justA4 && this.tryStartAttack('ataque_4', input)) return;
+      if (input.justA3 && this.tryStartAttack('ataque_3', input)) return;
+      if (input.justA2 && this.tryStartAttack('ataque_2', input)) return;
     }
 
     if (this.stateTime >= spec.duration) {
@@ -670,8 +676,106 @@ export class Fighter {
     }
   }
 
+  private resolveAttackDirection(input?: FighterInputState): {
+    dirX: number;
+    dirY: number;
+  } {
+    const rawX = input ? input.moveX : 0;
+    const rawY = input ? input.moveY : 0;
+    const ax =
+      Math.abs(rawX) > 0.25 ? rawX : input?.right ? 1 : input?.left ? -1 : 0;
+    const ay =
+      Math.abs(rawY) > 0.28 ? rawY : input?.down ? 1 : input?.up ? -1 : 0;
+
+    if (ax === 0 && ay === 0) {
+      if (Math.abs(this.lastOpponentX - this.x) > 8) {
+        this.facing = this.lastOpponentX >= this.x ? 1 : -1;
+      }
+      return { dirX: this.facing, dirY: 0 };
+    }
+
+    if (ax === 0) {
+      return { dirX: 0, dirY: ay < 0 ? -1 : 1 };
+    }
+
+    this.facing = ax >= 0 ? 1 : -1;
+    if (ay === 0) {
+      return { dirX: this.facing, dirY: 0 };
+    }
+
+    const len = Math.hypot(ax, ay) || 1;
+    return { dirX: ax / len, dirY: ay / len };
+  }
+
+  private applyAttackLunge(
+    action: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4',
+    spec: AttackSpec
+  ): void {
+    this.vx = this.attackDirX * spec.lungeX;
+    if (this.attackDirY < -0.32) {
+      if (action === 'ataque_2' || action === 'ataque_4') {
+        this.vy = Math.min(
+          this.vy,
+          this.attackDirY * Math.max(460, spec.lungeX * 0.95)
+        );
+        this.grounded = false;
+        this.currentPlatformId = null;
+      } else if (!this.grounded) {
+        this.vy = Math.min(this.vy, this.attackDirY * 220);
+      }
+    } else if (this.attackDirY > 0.32) {
+      if (
+        this.grounded &&
+        this.currentPlatformId !== null &&
+        (action === 'ataque_2' || action === 'ataque_4')
+      ) {
+        this.dropThroughTimer = 0.24;
+        this.grounded = false;
+        this.currentPlatformId = null;
+        this.vy = Math.max(
+          this.vy,
+          this.attackDirY * Math.max(420, spec.lungeX * 0.85)
+        );
+      } else if (!this.grounded) {
+        this.vy = Math.max(
+          this.vy,
+          this.attackDirY * Math.max(360, spec.lungeX * 0.72)
+        );
+      }
+    }
+  }
+
+  private beginAttackState(
+    action: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4',
+    spec: AttackSpec,
+    isRemote: boolean
+  ): void {
+    this.ki = isRemote ? Math.max(0, this.ki - spec.kiCost) : this.ki - spec.kiCost;
+    this.cooldowns[action] = spec.cooldown;
+    this.state = action;
+    this.stateTime = 0;
+    this.attackHitDone = false;
+    this.hitTargetsInCurrentAttack.clear();
+    this.projectileSpawned = false;
+    this.vfxSpawned = false;
+    this.applyAttackLunge(action, spec);
+    if (action === 'ataque_4') {
+      this.invulnTime = 0.35;
+      this.auraFlashTime = 0.65;
+    }
+
+    const sfxMap = {
+      ataque_1: 'atk1',
+      ataque_2: 'atk2',
+      ataque_3: 'atk3',
+      ataque_4: 'atk4',
+    } as const;
+    this.callbacks?.onPlaySfx(sfxMap[action]);
+  }
+
   public tryStartAttack(
-    action: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4'
+    action: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4',
+    input?: FighterInputState
   ): boolean {
     if (this.hp <= 0) return false;
     const spec = this.getAttackSpec(action);
@@ -679,59 +783,31 @@ export class Fighter {
       return false;
     }
 
-    if (Math.abs(this.lastOpponentX - this.x) > 8) {
-      this.facing = this.lastOpponentX >= this.x ? 1 : -1;
-    }
-
-    this.ki -= spec.kiCost;
-    this.cooldowns[action] = spec.cooldown;
-    this.state = action;
-    this.stateTime = 0;
-    this.attackHitDone = false;
-    this.hitTargetsInCurrentAttack.clear();
-    this.projectileSpawned = false;
-    this.vfxSpawned = false;
-    this.vx = this.facing * spec.lungeX;
-    if (action === 'ataque_4') {
-      this.invulnTime = 0.35;
-      this.auraFlashTime = 0.65;
-    }
-
-    const sfxMap = {
-      ataque_1: 'atk1',
-      ataque_2: 'atk2',
-      ataque_3: 'atk3',
-      ataque_4: 'atk4',
-    } as const;
-    this.callbacks?.onPlaySfx(sfxMap[action]);
+    const { dirX, dirY } = this.resolveAttackDirection(input);
+    this.attackDirX = dirX;
+    this.attackDirY = dirY;
+    this.beginAttackState(action, spec, false);
     return true;
   }
 
   public syncRemoteAttack(
-    action: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4'
+    action: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4',
+    attackDirX?: number,
+    attackDirY?: number
   ): void {
     const spec = this.getAttackSpec(action);
-    this.ki = Math.max(0, this.ki - spec.kiCost);
-    this.cooldowns[action] = spec.cooldown;
-    this.state = action;
-    this.stateTime = 0;
-    this.attackHitDone = false;
-    this.hitTargetsInCurrentAttack.clear();
-    this.projectileSpawned = false;
-    this.vfxSpawned = false;
-    this.vx = this.facing * spec.lungeX;
-    if (action === 'ataque_4') {
-      this.invulnTime = 0.35;
-      this.auraFlashTime = 0.65;
+    if (typeof attackDirX === 'number' && typeof attackDirY === 'number') {
+      const len = Math.hypot(attackDirX, attackDirY) || 1;
+      this.attackDirX = attackDirX / len;
+      this.attackDirY = attackDirY / len;
+      if (Math.abs(this.attackDirX) > 0.25) {
+        this.facing = this.attackDirX >= 0 ? 1 : -1;
+      }
+    } else {
+      this.attackDirX = this.facing;
+      this.attackDirY = 0;
     }
-
-    const sfxMap = {
-      ataque_1: 'atk1',
-      ataque_2: 'atk2',
-      ataque_3: 'atk3',
-      ataque_4: 'atk4',
-    } as const;
-    this.callbacks?.onPlaySfx(sfxMap[action]);
+    this.beginAttackState(action, spec, true);
   }
 
   public isBlockingHit(attackerX: number): boolean {
@@ -771,6 +847,8 @@ export class Fighter {
     if (knockbackY < -10) {
       this.vy = knockbackY;
       this.grounded = false;
+    } else if (knockbackY > 30 && !this.grounded) {
+      this.vy = Math.max(this.vy, knockbackY);
     }
     this.comboHitsReceived++;
     this.comboResetTimer = 1.25;
@@ -822,28 +900,101 @@ export class Fighter {
       };
     }
 
-    const rect: Rect =
-      this.facing === 1
-        ? {
-            x: this.x + 12,
-            y: this.y + spec.offsetY - spec.rangeH * 0.5,
-            w: spec.rangeW,
-            h: spec.rangeH,
-          }
-        : {
-            x: this.x - 12 - spec.rangeW,
-            y: this.y + spec.offsetY - spec.rangeH * 0.5,
-            w: spec.rangeW,
-            h: spec.rangeH,
-          };
+    if (Math.abs(this.attackDirY) < 0.25) {
+      const rect: Rect =
+        this.facing === 1
+          ? {
+              x: this.x + 12,
+              y: this.y + spec.offsetY - spec.rangeH * 0.5,
+              w: spec.rangeW,
+              h: spec.rangeH,
+            }
+          : {
+              x: this.x - 12 - spec.rangeW,
+              y: this.y + spec.offsetY - spec.rangeH * 0.5,
+              w: spec.rangeW,
+              h: spec.rangeH,
+            };
+      return { rect, spec };
+    }
 
-    return { rect, spec };
+    if (this.attackDirY < -0.78) {
+      const w = Math.max(88, spec.rangeH * 1.05);
+      const h = spec.rangeW * 1.05;
+      return {
+        rect: {
+          x: this.x + this.attackDirX * 20 - w * 0.5,
+          y: this.y - 88 - h,
+          w,
+          h,
+        },
+        spec,
+      };
+    }
+
+    if (this.attackDirY > 0.78) {
+      const w = Math.max(88, spec.rangeH * 1.05);
+      const h = spec.rangeW * 1.05;
+      return {
+        rect: {
+          x: this.x + this.attackDirX * 20 - w * 0.5,
+          y: this.y - 72,
+          w,
+          h,
+        },
+        spec,
+      };
+    }
+
+    const centerDist = 18 + spec.rangeW * 0.45;
+    const cx = this.x + this.attackDirX * centerDist;
+    const cy = this.y - 86 + this.attackDirY * centerDist;
+    const w = Math.max(
+      spec.rangeH,
+      Math.abs(this.attackDirX) * spec.rangeW * 0.88 + spec.rangeH * 0.45
+    );
+    const h = Math.max(
+      spec.rangeH,
+      Math.abs(this.attackDirY) * spec.rangeW * 0.88 + spec.rangeH * 0.45
+    );
+    return {
+      rect: {
+        x: cx - w * 0.5,
+        y: cy - h * 0.5,
+        w,
+        h,
+      },
+      spec,
+    };
+  }
+
+  private getDirectionalAttackAction(
+    baseAction: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4'
+  ): CanonicalAction {
+    let candidate: CanonicalAction = baseAction;
+    if (this.attackDirY < -0.78) {
+      candidate = `${baseAction}_up`;
+    } else if (this.attackDirY <= -0.32) {
+      candidate = `${baseAction}_diag_up`;
+    } else if (this.attackDirY > 0.78) {
+      candidate = `${baseAction}_down`;
+    } else if (this.attackDirY >= 0.32) {
+      candidate = `${baseAction}_diag_down`;
+    }
+    return this.phasePack.actions.has(candidate) ? candidate : baseAction;
   }
 
   public getCurrentFrame(): LoadedFrame | undefined {
     let action: CanonicalAction = 'idle';
     if (this.state === 'evolve') {
       action = 'ataque_4';
+    } else if (
+      this.state === 'ataque_1' ||
+      this.state === 'ataque_2' ||
+      this.state === 'ataque_3' ||
+      this.state === 'ataque_4'
+    ) {
+      action = this.getDirectionalAttackAction(this.state);
     } else {
       action = this.state;
     }

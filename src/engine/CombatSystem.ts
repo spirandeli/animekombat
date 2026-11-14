@@ -12,6 +12,7 @@ interface VfxInstance {
   x: number;
   y: number;
   facing: 1 | -1;
+  angle: number;
   frames: LoadedFrame[];
   elapsed: number;
   duration: number;
@@ -28,7 +29,9 @@ interface Projectile {
   x: number;
   y: number;
   vx: number;
+  vy: number;
   facing: 1 | -1;
+  angle: number;
   w: number;
   h: number;
   damage: number;
@@ -94,6 +97,7 @@ export class CombatSystem {
     x: 0,
     y: 0,
     facing: 1,
+    angle: 0,
     frames: [],
     elapsed: 0,
     duration: 0.35,
@@ -110,7 +114,9 @@ export class CombatSystem {
     x: 0,
     y: 0,
     vx: 0,
+    vy: 0,
     facing: 1,
+    angle: 0,
     w: 76,
     h: 58,
     damage: 0,
@@ -178,7 +184,8 @@ export class CombatSystem {
     facing: 1 | -1,
     duration: number,
     scale: number,
-    owner?: Fighter
+    owner?: Fighter,
+    angle = 0
   ): void {
     if (frames.length === 0) return;
     for (const item of this.vfxPool) {
@@ -187,12 +194,13 @@ export class CombatSystem {
         item.x = x;
         item.y = y;
         item.facing = facing;
+        item.angle = angle;
         item.frames = frames;
         item.elapsed = 0;
         item.duration = duration;
         item.scale = scale;
         item.owner = owner;
-        item.offsetX = owner ? Math.abs(x - owner.x) : 0;
+        item.offsetX = owner ? x - owner.x : 0;
         item.offsetY = owner ? y - owner.y : 0;
         return;
       }
@@ -210,6 +218,10 @@ export class CombatSystem {
   ): void {
     const frames = fighter.phasePack.vfx.get(vfxKey);
     if (!frames || frames.length === 0) return;
+    const angle = Math.atan2(
+      fighter.attackDirY,
+      fighter.attackDirX * fighter.facing
+    );
     this.enqueueVfxFrames(
       frames,
       x,
@@ -217,26 +229,40 @@ export class CombatSystem {
       fighter.facing,
       duration,
       scale,
-      followOwner ? fighter : undefined
+      followOwner ? fighter : undefined,
+      angle
     );
   }
 
   public spawnProjectile(fighter: Fighter, spec: AttackSpec): void {
     const frames = fighter.phasePack.vfx.get(spec.vfx) ?? [];
+    const dirLen = Math.hypot(fighter.attackDirX, fighter.attackDirY);
+    const dirX = dirLen > 0.01 ? fighter.attackDirX / dirLen : fighter.facing;
+    const dirY = dirLen > 0.01 ? fighter.attackDirY / dirLen : 0;
+    const baseChestY =
+      Math.abs(dirY) < 0.2 ? fighter.y + spec.offsetY : fighter.y - 96;
+
     for (const proj of this.projPool) {
       if (!proj.active) {
         proj.active = true;
         proj.ownerSlot = fighter.slot;
         proj.ownerTeam = fighter.team;
-        proj.x = fighter.x + fighter.facing * 72;
-        proj.y = fighter.y + spec.offsetY;
-        proj.vx = fighter.facing * spec.projectileSpeed;
+        proj.x = fighter.x + dirX * 72;
+        proj.y = baseChestY + dirY * 72;
+        proj.vx = dirX * spec.projectileSpeed;
+        proj.vy = dirY * spec.projectileSpeed;
         proj.facing = fighter.facing;
+        proj.angle = Math.atan2(dirY, dirX * fighter.facing);
         proj.w = 88;
         proj.h = 68;
         proj.damage = Math.round(spec.damage * fighter.getPhaseDamageMultiplier());
         proj.knockbackX = spec.knockbackX;
-        proj.knockbackY = spec.knockbackY;
+        proj.knockbackY =
+          dirY < -0.32
+            ? Math.min(spec.knockbackY, -460)
+            : dirY > 0.32
+              ? Math.max(spec.knockbackY, 360)
+              : spec.knockbackY;
         proj.hitstun = spec.hitstun;
         proj.hitStop = spec.hitStop;
         proj.kiGain = spec.kiGainOnHit;
@@ -320,6 +346,15 @@ export class CombatSystem {
   }
 
   public update(dt: number, p1: Fighter, p2: Fighter): boolean {
+    return this.updateMulti(dt, [p1, p2], p1.arenaLeft, p1.arenaRight);
+  }
+
+  public updateMulti(
+    dt: number,
+    fighters: Fighter[],
+    arenaLeft = Fighter.ARENA_LEFT,
+    arenaRight = Fighter.ARENA_RIGHT
+  ): boolean {
     if (this.shakeTime > 0) {
       this.shakeTime = Math.max(0, this.shakeTime - dt);
       if (this.shakeTime === 0) this.shakeIntensity = 0;
@@ -337,53 +372,88 @@ export class CombatSystem {
       return false;
     }
 
-    // Empurrão suave de corpo (impede sobreposição total no chão)
-    this.resolveBodyPush(p1, p2);
+    // Empurrão suave de corpo entre lutadores vivos próximos
+    this.resolveBodyPushMulti(fighters);
 
-    // Colisões corpo a corpo
-    this.checkMeleeHit(p1, p2);
-    this.checkMeleeHit(p2, p1);
+    // Colisões corpo a corpo entre times opostos
+    for (let i = 0; i < fighters.length; i++) {
+      const attacker = fighters[i];
+      if (attacker.hp <= 0) continue;
+      for (let j = 0; j < fighters.length; j++) {
+        if (i === j) continue;
+        const defender = fighters[j];
+        if (attacker.team === defender.team) continue;
+        this.checkMeleeHit(attacker, defender);
+      }
+    }
 
     // Projéteis
-    this.updateProjectiles(dt, p1, p2);
+    this.updateProjectilesMulti(dt, fighters, arenaLeft, arenaRight);
 
     return true;
   }
 
-  private resolveBodyPush(p1: Fighter, p2: Fighter): void {
-    const dx = p2.x - p1.x;
+  private resolveBodyPushMulti(fighters: Fighter[]): void {
     const minDist = 66;
-    const dy = Math.abs(p2.y - p1.y);
-    if (Math.abs(dx) < minDist && dy < 110) {
-      const overlap = (minDist - Math.abs(dx)) * 0.5;
-      const sign = dx >= 0 ? 1 : -1;
-      p1.x = Math.max(
-        Fighter.ARENA_LEFT,
-        Math.min(Fighter.ARENA_RIGHT, p1.x - sign * overlap)
-      );
-      p2.x = Math.max(
-        Fighter.ARENA_LEFT,
-        Math.min(Fighter.ARENA_RIGHT, p2.x + sign * overlap)
-      );
+    for (let i = 0; i < fighters.length; i++) {
+      const a = fighters[i];
+      if (a.hp <= 0) continue;
+      for (let j = i + 1; j < fighters.length; j++) {
+        const b = fighters[j];
+        if (b.hp <= 0) continue;
+        const dx = b.x - a.x;
+        const dy = Math.abs(b.y - a.y);
+        if (Math.abs(dx) < minDist && dy < 95) {
+          const overlap = (minDist - Math.abs(dx)) * 0.5;
+          const sign = dx >= 0 ? 1 : -1;
+          a.x = Math.max(
+            a.arenaLeft,
+            Math.min(a.arenaRight, a.x - sign * overlap)
+          );
+          b.x = Math.max(
+            b.arenaLeft,
+            Math.min(b.arenaRight, b.x + sign * overlap)
+          );
+        }
+      }
     }
   }
 
   private checkMeleeHit(attacker: Fighter, defender: Fighter): void {
-    if (defender.invulnTime > 0 || defender.hp <= 0) return;
+    if (
+      attacker.hp <= 0 ||
+      defender.hp <= 0 ||
+      attacker.team === defender.team ||
+      defender.invulnTime > 0 ||
+      attacker.hitTargetsInCurrentAttack.has(defender.slot)
+    ) {
+      return;
+    }
     const activeHit = attacker.getActiveAttackHitbox();
     if (!activeHit) return;
 
     const hurtbox = defender.getHurtbox();
     if (!rectsOverlap(activeHit.rect, hurtbox)) return;
 
+    attacker.hitTargetsInCurrentAttack.add(defender.slot);
     attacker.attackHitDone = true;
     const spec = activeHit.spec;
     const scaledDamage = spec.damage * attacker.getPhaseDamageMultiplier();
 
+    let kbX = spec.knockbackX;
+    let kbY = spec.knockbackY;
+    if (attacker.attackDirY < -0.32) {
+      kbY = Math.min(spec.knockbackY, -520 * Math.abs(attacker.attackDirY) - 180);
+      kbX = spec.knockbackX * Math.max(0.35, Math.abs(attacker.attackDirX));
+    } else if (attacker.attackDirY > 0.32) {
+      kbY = Math.max(spec.knockbackY, 440 * attacker.attackDirY + 140);
+      kbX = spec.knockbackX * Math.max(0.4, Math.abs(attacker.attackDirX));
+    }
+
     const result = defender.receiveHit(
       scaledDamage,
-      spec.knockbackX,
-      spec.knockbackY,
+      kbX,
+      kbY,
       spec.hitstun,
       attacker.x
     );
@@ -447,16 +517,24 @@ export class CombatSystem {
     );
   }
 
-  private updateProjectiles(dt: number, p1: Fighter, p2: Fighter): void {
+  private updateProjectilesMulti(
+    dt: number,
+    fighters: Fighter[],
+    arenaLeft: number,
+    arenaRight: number
+  ): void {
     for (const proj of this.projPool) {
       if (!proj.active) continue;
       proj.x += proj.vx * dt;
+      proj.y += proj.vy * dt;
       proj.elapsed += dt;
       proj.life -= dt;
 
       const outOfBounds =
-        proj.x < Fighter.ARENA_LEFT - 120 ||
-        proj.x > Fighter.ARENA_RIGHT + 120;
+        proj.x < arenaLeft - 160 ||
+        proj.x > arenaRight + 160 ||
+        proj.y < -280 ||
+        proj.y > 920;
       if (proj.life <= 0 || outOfBounds) {
         if (!outOfBounds && proj.frames.length >= 3) {
           this.enqueueVfxFrames(
@@ -465,16 +543,14 @@ export class CombatSystem {
             proj.y,
             proj.facing,
             0.22,
-            0.48
+            0.48,
+            undefined,
+            proj.angle
           );
         }
         proj.active = false;
         continue;
       }
-
-      const attacker = proj.ownerSlot === 'p1' ? p1 : p2;
-      const defender = proj.ownerSlot === 'p1' ? p2 : p1;
-      if (defender.invulnTime > 0 || defender.hp <= 0) continue;
 
       const projRect: Rect = {
         x: proj.x - proj.w * 0.5,
@@ -483,47 +559,61 @@ export class CombatSystem {
         h: proj.h,
       };
 
-      if (rectsOverlap(projRect, defender.getHurtbox())) {
-        proj.active = false;
-        if (proj.frames.length >= 3) {
-          this.enqueueVfxFrames(
-            proj.frames.slice(2),
-            proj.x,
-            proj.y,
-            proj.facing,
-            0.24,
-            0.52
-          );
-        }
-        const result = defender.receiveHit(
-          proj.damage,
-          proj.knockbackX,
-          proj.knockbackY,
-          proj.hitstun,
-          proj.x
-        );
+      const defender = fighters.find(
+        (f) =>
+          f.team !== proj.ownerTeam &&
+          f.invulnTime <= 0 &&
+          f.hp > 0 &&
+          rectsOverlap(projRect, f.getHurtbox())
+      );
+      if (!defender) continue;
 
-        if (result.blocked) {
-          this.spawnBurstParticles(proj.x, proj.y, '#38bdf8', 10, 230);
-          this.spawnFloatingText(defender.x, defender.y - 165, 'DEFESA', '#38bdf8', 0.9);
-        } else {
-          this.spawnBurstParticles(proj.x, proj.y, proj.auraColor, 18, 320);
-          this.spawnFloatingText(
-            defender.x,
-            defender.y - 175,
-            `-${result.finalDamage}`,
-            '#38bdf8',
-            1.1
-          );
+      const attacker = fighters.find((f) => f.slot === proj.ownerSlot);
+      proj.active = false;
+      if (proj.frames.length >= 3) {
+        this.enqueueVfxFrames(
+          proj.frames.slice(2),
+          proj.x,
+          proj.y,
+          proj.facing,
+          0.24,
+          0.52,
+          undefined,
+          proj.angle
+        );
+      }
+      const result = defender.receiveHit(
+        proj.damage,
+        proj.knockbackX,
+        proj.knockbackY,
+        proj.hitstun,
+        proj.x
+      );
+
+      if (result.blocked) {
+        this.spawnBurstParticles(proj.x, proj.y, '#38bdf8', 10, 230);
+        this.spawnFloatingText(defender.x, defender.y - 165, 'DEFESA', '#38bdf8', 0.9);
+      } else {
+        this.spawnBurstParticles(proj.x, proj.y, proj.auraColor, 18, 320);
+        this.spawnFloatingText(
+          defender.x,
+          defender.y - 175,
+          `-${result.finalDamage}`,
+          '#38bdf8',
+          1.1
+        );
+        if (attacker) {
           attacker.ki = Math.min(attacker.maxKi, attacker.ki + proj.kiGain);
           attacker.addCombatXpAndEnergy(14, 18);
-          this.hitStopRemaining = Math.max(this.hitStopRemaining, proj.hitStop);
-          this.triggerScreenShake(7, 0.16);
           if (defender.comboHitsReceived >= 2) {
             this.events?.onComboUpdate?.(attacker.slot, defender.comboHitsReceived);
           }
         }
+        this.hitStopRemaining = Math.max(this.hitStopRemaining, proj.hitStop);
+        this.triggerScreenShake(7, 0.16);
+      }
 
+      if (attacker) {
         this.events?.onHitImpact?.(
           attacker,
           defender,
@@ -547,8 +637,12 @@ export class CombatSystem {
           v.owner.state === 'ataque_4'
         ) {
           v.facing = v.owner.facing;
-          v.x = v.owner.x + v.owner.facing * v.offsetX;
+          v.x = v.owner.x + v.offsetX;
           v.y = v.owner.y + v.offsetY;
+          v.angle = Math.atan2(
+            v.owner.attackDirY,
+            v.owner.attackDirX * v.owner.facing
+          );
         } else {
           v.owner = undefined;
         }
@@ -587,11 +681,15 @@ export class CombatSystem {
     y: number,
     facing: 1 | -1,
     scale: number,
-    alpha: number
+    alpha: number,
+    angle = 0
   ): void {
     ctx.save();
     ctx.translate(x, y);
     ctx.scale(facing * scale, scale);
+    if (angle !== 0) {
+      ctx.rotate(angle);
+    }
 
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 0.92 * alpha;
@@ -634,7 +732,8 @@ export class CombatSystem {
         v.y,
         v.facing,
         v.scale,
-        fadeAlpha
+        fadeAlpha,
+        v.angle
       );
     }
 
@@ -651,7 +750,8 @@ export class CombatSystem {
           proj.y,
           proj.facing,
           0.44,
-          1
+          1,
+          proj.angle
         );
       } else {
         ctx.save();

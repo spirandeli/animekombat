@@ -1,8 +1,18 @@
 import { AudioManager } from '../engine/AudioManager';
 import { CharactersManifest } from '../engine/SpriteLoader';
 import { AIDifficulty } from '../game/AIController';
+import { ARENA_THEMES, getArenaThemeInfo } from '../game/ArenaMap';
 import { MatchConfig, MatchEndReport } from '../game/ArenaScene';
-import { NetworkClient, RoomInvitePayload } from '../net/NetworkClient';
+import {
+  FighterSlotId,
+  NetworkClient,
+  RoomInvitePayload,
+  RoomMode,
+  RoomSlotState,
+  RoomState,
+  SlotMode,
+  teamForSlot,
+} from '../net/NetworkClient';
 import { PwaManager } from '../pwa/PwaManager';
 import { SaveManager, xpRequiredForLevel } from '../storage/SaveManager';
 
@@ -59,8 +69,13 @@ export class Menus {
   private selectedP2 = 'luffy';
   private selectedStartPhase = 1;
   private selectingSlot: 'p1' | 'p2' = 'p1';
-  private lobbyEditingSlot: 'p1' | 'p2' = 'p1';
+  private lobbyEditingSlot: FighterSlotId = 'p1';
   private loadingPercent = 0;
+
+  private createRoomMode: RoomMode = 'rumble';
+  private createTeamSize: 2 | 3 = 3;
+  private createRoomPublic = true;
+  private createMapTheme = 'random';
 
   // Estado de formulários e feedback (preservado entre re-renders)
   private authTab: 'login' | 'register' = 'login';
@@ -151,8 +166,17 @@ export class Menus {
       if (room && this.currentScreen !== 'loading' && this.currentScreen !== 'none') {
         this.currentScreen = 'lobby';
         this.roomErrorMsg = null;
-        if (room.p2Mode !== 'bot') {
-          this.lobbyEditingSlot = 'p1';
+        const actorId = this.net.getActorId();
+        const isHost = room.hostId === actorId;
+        const slots = this.getNormalizedSlots(room);
+        const mySlot = this.findActorSlot(room, slots) ?? 'p1';
+        const editingTarget = slots[this.lobbyEditingSlot];
+        if (
+          !isHost ||
+          !editingTarget ||
+          (!editingTarget.isBot && editingTarget.userId !== actorId)
+        ) {
+          this.lobbyEditingSlot = mySlot;
         }
         this.render();
       } else if (!room && this.currentScreen === 'lobby') {
@@ -635,27 +659,98 @@ export class Menus {
     `;
   }
 
+  private getNormalizedSlots(room: RoomState): Record<FighterSlotId, RoomSlotState> {
+    if (room.slots) return room.slots;
+    const makeEmpty = (slot: FighterSlotId): RoomSlotState => ({
+      slot,
+      team: teamForSlot(slot),
+      slotMode: 'human',
+      userId: null,
+      username: 'Vaga Aberta...',
+      friendCode: null,
+      isGuest: false,
+      isBot: false,
+      charId: 'luffy',
+      startPhase: 1,
+      level: 1,
+      ready: false,
+    });
+    return {
+      p1: { ...room.p1, slot: 'p1', team: 1, slotMode: 'human' },
+      p2: {
+        ...room.p2,
+        slot: 'p2',
+        team: 2,
+        slotMode: room.p2Mode === 'bot' ? 'bot' : 'human',
+      },
+      p3: makeEmpty('p3'),
+      p4: makeEmpty('p4'),
+      p5: makeEmpty('p5'),
+      p6: makeEmpty('p6'),
+    };
+  }
+
+  private getActiveSlots(room: RoomState): FighterSlotId[] {
+    const all: FighterSlotId[] = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'];
+    const size =
+      room.roomMode === 'rumble'
+        ? Math.max(2, Math.min(3, room.teamSize ?? 3))
+        : 1;
+    return all.slice(0, size * 2);
+  }
+
+  private findActorSlot(
+    room: RoomState,
+    slots: Record<FighterSlotId, RoomSlotState>
+  ): FighterSlotId | null {
+    const actorId = this.net.getActorId();
+    for (const sid of this.getActiveSlots(room)) {
+      const s = slots[sid];
+      if (s && s.slotMode !== 'closed' && !s.isBot && s.userId === actorId) {
+        return sid;
+      }
+    }
+    return room.p1.userId === actorId ? 'p1' : room.p2.userId === actorId ? 'p2' : null;
+  }
+
   private renderRoomsScreen(): string {
     const openRooms = this.net.getOpenRooms();
     const isOnline = this.net.isOnline();
     const pendingCount = this.net.getFriendsOverview().incomingRequests.length;
+    const modeLabel =
+      this.createRoomMode === 'rumble'
+        ? `Rumble ${this.createTeamSize}v${this.createTeamSize}`
+        : '1v1';
 
     const roomsListHtml =
       openRooms.length === 0
-        ? `<div class="ak-empty-box">Nenhuma sala aberta no momento. Crie uma sala acima e convide um amigo ou jogue contra Bot!</div>`
+        ? `<div class="ak-empty-box">Nenhuma sala aberta no momento. Crie uma sala acima e convide amigos ou lute contra Bots!</div>`
         : openRooms
             .map((r) => {
               const charName = this.manifest.characters[r.p1CharId]?.name ?? r.p1CharId;
+              const isRumble = r.roomMode === 'rumble';
+              const maxP = r.maxPlayers ?? (isRumble ? (r.teamSize ?? 3) * 2 : 2);
+              const occ = r.occupiedCount ?? (r.hasFreeSlot ? 1 : maxP);
+              const themeLabel =
+                isRumble && r.mapTheme && r.mapTheme !== 'random'
+                  ? ` · ${getArenaThemeInfo(r.mapTheme).name}`
+                  : '';
               return `
                 <div class="ak-list-row">
                   <div>
-                    <div style="font-weight:800;display:flex;align-items:center;gap:8px;">
+                    <div style="font-weight:800;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                       <span>#${escapeHtml(r.code)}</span>
                       <span>${escapeHtml(r.hostName)}</span>
+                      <span class="ak-mini-badge ${isRumble ? 'amber' : 'cyan'}">
+                        ${isRumble ? `RUMBLE ${r.teamSize ?? 3}v${r.teamSize ?? 3}` : '1v1'}
+                      </span>
+                      <span class="ak-mini-badge ${r.isPublic ? 'green' : ''}">
+                        ${r.isPublic ? 'PÚBLICA' : 'PRIVADA'}
+                      </span>
                       ${r.isFriend ? '<span class="ak-mini-badge cyan">Amigo</span>' : ''}
                     </div>
                     <div class="ak-profile-sub">
-                      ${escapeHtml(charName)} (F${r.p1Phase}) · ${r.hasFreeSlot ? '1/2 Vaga aberta' : 'Em configuração'}
+                      ${escapeHtml(charName)} (F${r.p1Phase}) · ${occ}/${maxP} lutadores${escapeHtml(themeLabel)} · ${r.hasFreeSlot ? `${r.openHumanSlots ?? 1} vaga(s) aberta(s)` : 'Completa'}
                     </div>
                   </div>
                   <button
@@ -688,7 +783,7 @@ export class Menus {
           ${
             !isOnline
               ? `<div class="ak-alert-warn" style="margin-top:10px;">
-                  Sem conexão com o servidor multiplayer. Você ainda pode criar uma <strong>Sala vs Bot</strong> offline!
+                  Sem conexão com o servidor multiplayer. Você ainda pode criar uma <strong>Sala vs Bot / Rumble offline</strong>!
                 </div>`
               : ''
           }
@@ -699,12 +794,60 @@ export class Menus {
               : ''
           }
 
+          <div class="ak-room-create-options">
+            <div class="ak-field">
+              <label>Modo da Nova Sala</label>
+              <div class="ak-seg-group">
+                <button type="button" class="ak-seg-btn ak-seg-sm ${this.createRoomMode === '1v1' ? 'active' : ''}" data-create-preset="1v1">
+                  ⚔️ 1v1 Clássico
+                </button>
+                <button type="button" class="ak-seg-btn ak-seg-sm ${this.createRoomMode === 'rumble' && this.createTeamSize === 2 ? 'active' : ''}" data-create-preset="rumble-2">
+                  🔥 Rumble 2v2
+                </button>
+                <button type="button" class="ak-seg-btn ak-seg-sm ${this.createRoomMode === 'rumble' && this.createTeamSize === 3 ? 'active' : ''}" data-create-preset="rumble-3">
+                  💥 Rumble 3v3
+                </button>
+              </div>
+            </div>
+
+            <div class="ak-field">
+              <label>Visibilidade da Sala</label>
+              <div class="ak-seg-group">
+                <button type="button" class="ak-seg-btn ak-seg-sm ${this.createRoomPublic ? 'active' : ''}" data-create-visibility="public">
+                  🌐 Pública (Listada)
+                </button>
+                <button type="button" class="ak-seg-btn ak-seg-sm ${!this.createRoomPublic ? 'active' : ''}" data-create-visibility="private">
+                  🔒 Privada (Amigos/Código)
+                </button>
+              </div>
+            </div>
+
+            ${
+              this.createRoomMode === 'rumble'
+                ? `<div class="ak-field">
+                    <label>Ambiente / Plano de Fundo da Arena</label>
+                    <div class="ak-seg-group ak-theme-pills">
+                      <button type="button" class="ak-seg-btn ak-seg-sm ${this.createMapTheme === 'random' ? 'active' : ''}" data-create-theme="random">
+                        🎲 Aleatório
+                      </button>
+                      ${ARENA_THEMES.map(
+                        (t) => `
+                        <button type="button" class="ak-seg-btn ak-seg-sm ${this.createMapTheme === t.id ? 'active' : ''}" data-create-theme="${t.id}">
+                          ${escapeHtml(t.name)}
+                        </button>`
+                      ).join('')}
+                    </div>
+                  </div>`
+                : ''
+            }
+          </div>
+
           <div class="ak-rooms-actions">
             <button id="btn-create-room-human" class="ak-btn ak-btn-primary" type="button">
-              Criar Sala p/ Amigo
+              Criar ${modeLabel} (Vagas Abertas)
             </button>
             <button id="btn-create-room-bot" class="ak-btn ak-btn-cyan" type="button">
-              Criar Sala vs Bot
+              Criar ${modeLabel} c/ Bots
             </button>
           </div>
 
@@ -742,21 +885,20 @@ export class Menus {
 
     const actorId = this.net.getActorId();
     const isHost = room.hostId === actorId;
-    const isP2Human = !isHost && room.p2.userId === actorId;
+    const slots = this.getNormalizedSlots(room);
+    const activeIds = this.getActiveSlots(room);
+    const mySlotKey = this.findActorSlot(room, slots);
+    const mySlot = mySlotKey ? slots[mySlotKey] : null;
+    const isRumble = room.roomMode === 'rumble';
 
-    const editingSlotKey: 'p1' | 'p2' =
-      isHost && room.p2Mode === 'bot' && this.lobbyEditingSlot === 'p2'
-        ? 'p2'
-        : isHost
-          ? 'p1'
-          : 'p2';
-    const editingSlot = editingSlotKey === 'p1' ? room.p1 : room.p2;
-    const editingBot = isHost && room.p2Mode === 'bot' && editingSlotKey === 'p2';
-
-    const p1Char = this.manifest.characters[room.p1.charId];
-    const p2Char = this.manifest.characters[room.p2.charId];
-    const p1Thumb = p1Char?.phases.fase_1?.actions.idle[0]?.src ?? '';
-    const p2Thumb = p2Char?.phases.fase_1?.actions.idle[0]?.src ?? '';
+    const editingTarget = slots[this.lobbyEditingSlot];
+    const editingSlotKey: FighterSlotId =
+      editingTarget &&
+      ((isHost && editingTarget.isBot) || editingTarget.userId === actorId)
+        ? this.lobbyEditingSlot
+        : mySlotKey ?? 'p1';
+    const editingSlot = slots[editingSlotKey];
+    const editingBot = Boolean(isHost && editingSlot.isBot);
 
     const chars = Object.values(this.manifest.characters);
     const activeChar = this.manifest.characters[editingSlot.charId];
@@ -773,14 +915,14 @@ export class Menus {
         return `
           <button
             type="button"
-            class="ak-char-card ${selected ? (editingSlotKey === 'p1' ? 'selected-p1' : 'selected-cpu') : ''}"
+            class="ak-char-card ${selected ? (editingSlotKey === mySlotKey ? 'selected-p1' : 'selected-cpu') : ''}"
             data-lobby-char="${c.id}"
           >
             <div class="ak-char-top">
               <img class="ak-char-thumb" src="${thumbSrc}" alt="${escapeHtml(c.name)}" />
               <div class="ak-char-meta">
                 <h3>${escapeHtml(c.name)}</h3>
-                <div class="ak-char-level">${editingBot ? 'Modo Bot' : `Nível ${prog.level}`}</div>
+                <div class="ak-char-level">${editingBot ? 'Bot CPU' : `Nível ${prog.level}`}</div>
                 ${selected ? `<div style="font-size:0.72rem;font-weight:900;color:var(--ak-cyan);">SELECIONADO</div>` : ''}
               </div>
             </div>
@@ -812,11 +954,236 @@ export class Menus {
       { id: 'master', label: 'Mestre' },
     ];
 
-    const canStart =
-      isHost &&
-      (room.p2Mode === 'bot' || (Boolean(room.p2.userId) && room.p2.ready));
+    const hasAnyBot = activeIds.some((sid) => slots[sid].slotMode === 'bot');
+    const themeName =
+      !room.mapTheme || room.mapTheme === 'random'
+        ? 'Aleatório (por Seed)'
+        : getArenaThemeInfo(room.mapTheme).name;
 
-    const p2Occupied = Boolean(room.p2.userId);
+    let versusOrRumbleHtml = '';
+    let canStart = false;
+    let hostStatusHint = '';
+
+    if (!isRumble) {
+      const p1Char = this.manifest.characters[room.p1.charId];
+      const p2Char = this.manifest.characters[room.p2.charId];
+      const p1Thumb = p1Char?.phases.fase_1?.actions.idle[0]?.src ?? '';
+      const p2Thumb = p2Char?.phases.fase_1?.actions.idle[0]?.src ?? '';
+      const p2Occupied = Boolean(room.p2.userId);
+      canStart =
+        isHost &&
+        (room.p2Mode === 'bot' || (Boolean(room.p2.userId) && room.p2.ready));
+      hostStatusHint = canStart
+        ? 'Tudo pronto! Inicie a batalha quando quiser.'
+        : room.p2Mode === 'human' && !p2Occupied
+          ? 'Convide um amigo ou mude o P2 para Bot para começar.'
+          : 'Aguardando o amigo clicar em "Pronto!".';
+
+      versusOrRumbleHtml = `
+        <div class="ak-lobby-versus">
+          <div class="ak-lobby-slot p1">
+            <div class="ak-slot-header">
+              <span class="ak-mini-badge cyan">P1 · LÍDER</span>
+              <span class="ak-mini-badge green">PRONTO</span>
+            </div>
+            <div class="ak-slot-player">
+              <img class="ak-char-thumb" src="${p1Thumb}" alt="${escapeHtml(p1Char?.name ?? '')}" />
+              <div>
+                <div class="ak-slot-name">${escapeHtml(room.p1.username)}</div>
+                <div class="ak-profile-sub">
+                  ${escapeHtml(p1Char?.name ?? room.p1.charId)} · Fase ${room.p1.startPhase} · Nv ${room.p1.level}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="ak-vs-pill">VS</div>
+
+          <div class="ak-lobby-slot p2">
+            <div class="ak-slot-header">
+              <span class="ak-mini-badge ${room.p2Mode === 'bot' ? 'amber' : 'red'}">
+                ${room.p2Mode === 'bot' ? 'P2 · BOT CPU' : 'P2 · AMIGO'}
+              </span>
+              ${
+                room.p2Mode === 'bot'
+                  ? '<span class="ak-mini-badge green">PRONTO</span>'
+                  : p2Occupied
+                    ? `<span class="ak-mini-badge ${room.p2.ready ? 'green' : 'amber'}">${room.p2.ready ? 'PRONTO!' : 'ESCOLHENDO'}</span>`
+                    : '<span class="ak-mini-badge">VAGA ABERTA</span>'
+              }
+            </div>
+
+            ${
+              p2Occupied
+                ? `<div class="ak-slot-player">
+                    <img class="ak-char-thumb" src="${p2Thumb}" alt="${escapeHtml(p2Char?.name ?? '')}" />
+                    <div>
+                      <div class="ak-slot-name">${escapeHtml(room.p2.username)}</div>
+                      <div class="ak-profile-sub">
+                        ${escapeHtml(p2Char?.name ?? room.p2.charId)} · Fase ${room.p2.startPhase}
+                      </div>
+                    </div>
+                  </div>`
+                : `<div class="ak-waiting-slot">
+                    Aguardando amigo entrar...<br/>
+                    <span style="font-size:0.75rem;color:var(--ak-muted);">Envie o código <strong>#${escapeHtml(room.code)}</strong> ou clique em <strong>Convidar Amigo</strong>.</span>
+                  </div>`
+            }
+
+            ${
+              isHost
+                ? `<div class="ak-seg-group" style="margin-top:8px;">
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${room.p2Mode === 'human' ? 'active' : ''}" data-p2-mode="human">
+                      👤 Com Amigo
+                    </button>
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${room.p2Mode === 'bot' ? 'active' : ''}" data-p2-mode="bot">
+                      🤖 Com Bot
+                    </button>
+                  </div>`
+                : ''
+            }
+          </div>
+        </div>
+      `;
+    } else {
+      const team1Ids = activeIds.filter((sid) => teamForSlot(sid) === 1);
+      const team2Ids = activeIds.filter((sid) => teamForSlot(sid) === 2);
+
+      let t1Active = 0;
+      let t2Active = 0;
+      let notReadyName: string | null = null;
+      for (const sid of activeIds) {
+        const s = slots[sid];
+        if (s.slotMode === 'bot' || (s.slotMode === 'human' && s.userId)) {
+          if (teamForSlot(sid) === 1) t1Active += 1;
+          else t2Active += 1;
+        }
+        if (s.slotMode === 'human' && s.userId && s.userId !== room.hostId && !s.ready) {
+          notReadyName = s.username;
+        }
+      }
+      canStart = isHost && t1Active >= 1 && t2Active >= 1 && !notReadyName;
+      hostStatusHint = canStart
+        ? 'Tudo pronto! Arena procedural preparada para o Rumble!'
+        : t1Active === 0 || t2Active === 0
+          ? 'Os dois times precisam ter ao menos 1 lutador (jogador ou bot).'
+          : `Aguardando ${notReadyName} clicar em "Pronto!".`;
+
+      const renderRumbleCard = (sid: FighterSlotId) => {
+        const s = slots[sid];
+        const ch = this.manifest.characters[s.charId];
+        const thumb = ch?.phases.fase_1?.actions.idle[0]?.src ?? '';
+        const isMe = s.slotMode === 'human' && s.userId === actorId;
+        const isLeader = s.slotMode === 'human' && s.userId === room.hostId;
+        const isOccupied = s.slotMode === 'bot' || (s.slotMode === 'human' && Boolean(s.userId));
+        const isEditingThis = editingSlotKey === sid;
+
+        const badgeHtml =
+          s.slotMode === 'closed'
+            ? '<span class="ak-mini-badge">FECHADA</span>'
+            : s.slotMode === 'bot'
+              ? '<span class="ak-mini-badge amber">BOT</span>'
+              : s.userId
+                ? `<span class="ak-mini-badge ${isLeader || s.ready ? 'green' : 'amber'}">${isLeader ? 'LÍDER' : s.ready ? 'PRONTO!' : 'ESCOLHENDO'}</span>`
+                : '<span class="ak-mini-badge">VAGA ABERTA</span>';
+
+        return `
+          <div class="ak-rumble-slot-card ${isMe ? 'is-me' : ''} ${isEditingThis ? 'is-editing' : ''} ${s.slotMode === 'closed' ? 'is-closed' : ''}">
+            <div class="ak-slot-header">
+              <span class="ak-mini-badge ${teamForSlot(sid) === 1 ? 'cyan' : 'red'}">${sid.toUpperCase()}${isMe ? ' · VOCÊ' : ''}</span>
+              ${badgeHtml}
+            </div>
+            ${
+              isOccupied
+                ? `<div class="ak-slot-player ak-slot-player-sm">
+                    <img class="ak-char-thumb ak-thumb-sm" src="${thumb}" alt="${escapeHtml(ch?.name ?? '')}" />
+                    <div style="min-width:0;">
+                      <div class="ak-slot-name">${escapeHtml(s.username)}</div>
+                      <div class="ak-profile-sub">
+                        ${escapeHtml(ch?.name ?? s.charId)} · F${s.startPhase} · Nv ${s.level}
+                      </div>
+                    </div>
+                  </div>`
+                : `<div class="ak-waiting-slot-sm">
+                    ${s.slotMode === 'closed' ? 'Vaga fechada pelo líder' : 'Aguardando jogador entrar...'}
+                  </div>`
+            }
+            ${
+              isHost && s.userId !== actorId
+                ? `<div class="ak-slot-controls">
+                    <button type="button" class="ak-mini-btn ${s.slotMode === 'human' ? 'active' : ''}" data-slot-config="${sid}:human">Aberta</button>
+                    <button type="button" class="ak-mini-btn ${s.slotMode === 'bot' ? 'active' : ''}" data-slot-config="${sid}:bot">Bot</button>
+                    <button type="button" class="ak-mini-btn ${s.slotMode === 'closed' ? 'active' : ''}" data-slot-config="${sid}:closed">Fechar</button>
+                    ${
+                      s.slotMode === 'bot'
+                        ? `<button type="button" class="ak-mini-btn edit ${isEditingThis ? 'active' : ''}" data-lobby-slot="${sid}">Editar</button>`
+                        : ''
+                    }
+                  </div>`
+                : ''
+            }
+          </div>
+        `;
+      };
+
+      versusOrRumbleHtml = `
+        <div class="ak-rumble-toolbar">
+          <div class="ak-rumble-map-meta">
+            <span class="ak-mini-badge amber">MAPA: ${escapeHtml(themeName)}</span>
+            <span class="ak-profile-sub">Seed #${room.mapSeed ?? 1337}</span>
+          </div>
+          <div class="ak-rumble-toolbar-btns">
+            ${
+              mySlotKey
+                ? `<button id="btn-switch-team" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                    ⇄ Trocar de Time
+                  </button>`
+                : ''
+            }
+            ${
+              isHost
+                ? `<button id="btn-reroll-map" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                    🎲 Sortear Mapa
+                  </button>
+                  <button id="btn-fill-bots" class="ak-btn ak-btn-cyan ak-btn-sm" type="button">
+                    🤖 Preencher c/ Bots
+                  </button>
+                  <button id="btn-open-all-human" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                    👥 Abrir Vagas
+                  </button>`
+                : ''
+            }
+          </div>
+        </div>
+
+        ${
+          isHost
+            ? `<div class="ak-seg-group ak-theme-pills" style="margin-top:8px;">
+                <button type="button" class="ak-seg-btn ak-seg-sm ${!room.mapTheme || room.mapTheme === 'random' ? 'active' : ''}" data-room-theme="random">
+                  🎲 Aleatório
+                </button>
+                ${ARENA_THEMES.map(
+                  (t) => `
+                  <button type="button" class="ak-seg-btn ak-seg-sm ${room.mapTheme === t.id ? 'active' : ''}" data-room-theme="${t.id}">
+                    ${escapeHtml(t.name)}
+                  </button>`
+                ).join('')}
+              </div>`
+            : ''
+        }
+
+        <div class="ak-rumble-lobby-grid">
+          <div class="ak-rumble-team-col t1">
+            <div class="ak-team-col-title blue">TIME AZUL (${t1Active}/${team1Ids.length})</div>
+            ${team1Ids.map(renderRumbleCard).join('')}
+          </div>
+          <div class="ak-rumble-team-col t2">
+            <div class="ak-team-col-title red">TIME VERMELHO (${t2Active}/${team2Ids.length})</div>
+            ${team2Ids.map(renderRumbleCard).join('')}
+          </div>
+        </div>
+      `;
+    }
 
     return `
       <div class="ak-screen">
@@ -827,8 +1194,14 @@ export class Menus {
             </button>
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
               <h2 style="margin:0;">Sala #${escapeHtml(room.code)}</h2>
+              <span class="ak-mini-badge ${isRumble ? 'amber' : 'cyan'}">
+                ${isRumble ? `RUMBLE ${room.teamSize ?? 3}v${room.teamSize ?? 3}` : '1v1'}
+              </span>
+              <span class="ak-mini-badge ${room.isPublic ? 'green' : ''}">
+                ${room.isPublic ? '🌐 PÚBLICA' : '🔒 PRIVADA'}
+              </span>
               <button id="btn-copy-room-code" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-                Copiar Código
+                Copiar
               </button>
             </div>
             <button id="btn-open-friends" class="ak-btn ak-btn-cyan ak-btn-sm" type="button">
@@ -837,102 +1210,70 @@ export class Menus {
           </div>
 
           ${
+            isHost
+              ? `<div class="ak-lobby-host-config">
+                  <div class="ak-seg-group">
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${!isRumble ? 'active' : ''}" data-room-preset="1v1">
+                      1v1
+                    </button>
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${isRumble && room.teamSize === 2 ? 'active' : ''}" data-room-preset="rumble-2">
+                      Rumble 2v2
+                    </button>
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${isRumble && (room.teamSize ?? 3) === 3 ? 'active' : ''}" data-room-preset="rumble-3">
+                      Rumble 3v3
+                    </button>
+                  </div>
+                  <div class="ak-seg-group">
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${room.isPublic ? 'active' : ''}" data-room-public="true">
+                      🌐 Pública
+                    </button>
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${!room.isPublic ? 'active' : ''}" data-room-public="false">
+                      🔒 Privada
+                    </button>
+                  </div>
+                </div>`
+              : ''
+          }
+
+          ${
             this.roomErrorMsg
               ? `<div class="ak-alert-err" style="margin-top:8px;">${escapeHtml(this.roomErrorMsg)}</div>`
               : ''
           }
 
-          <div class="ak-lobby-versus">
-            <div class="ak-lobby-slot p1">
-              <div class="ak-slot-header">
-                <span class="ak-mini-badge cyan">P1 · LÍDER</span>
-                <span class="ak-mini-badge green">PRONTO</span>
-              </div>
-              <div class="ak-slot-player">
-                <img class="ak-char-thumb" src="${p1Thumb}" alt="${escapeHtml(p1Char?.name ?? '')}" />
-                <div>
-                  <div class="ak-slot-name">${escapeHtml(room.p1.username)}</div>
-                  <div class="ak-profile-sub">
-                    ${escapeHtml(p1Char?.name ?? room.p1.charId)} · Fase ${room.p1.startPhase} · Nv ${room.p1.level}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="ak-vs-pill">VS</div>
-
-            <div class="ak-lobby-slot p2">
-              <div class="ak-slot-header">
-                <span class="ak-mini-badge ${room.p2Mode === 'bot' ? 'amber' : 'red'}">
-                  ${room.p2Mode === 'bot' ? 'P2 · BOT CPU' : 'P2 · AMIGO'}
-                </span>
-                ${
-                  room.p2Mode === 'bot'
-                    ? '<span class="ak-mini-badge green">PRONTO</span>'
-                    : p2Occupied
-                      ? `<span class="ak-mini-badge ${room.p2.ready ? 'green' : 'amber'}">${room.p2.ready ? 'PRONTO!' : 'ESCOLHENDO'}</span>`
-                      : '<span class="ak-mini-badge">VAGA ABERTA</span>'
-                }
-              </div>
-
-              ${
-                p2Occupied
-                  ? `<div class="ak-slot-player">
-                      <img class="ak-char-thumb" src="${p2Thumb}" alt="${escapeHtml(p2Char?.name ?? '')}" />
-                      <div>
-                        <div class="ak-slot-name">${escapeHtml(room.p2.username)}</div>
-                        <div class="ak-profile-sub">
-                          ${escapeHtml(p2Char?.name ?? room.p2.charId)} · Fase ${room.p2.startPhase}
-                        </div>
-                      </div>
-                    </div>`
-                  : `<div class="ak-waiting-slot">
-                      Aguardando amigo entrar...<br/>
-                      <span style="font-size:0.75rem;color:var(--ak-muted);">Envie o código <strong>#${escapeHtml(room.code)}</strong> ou clique em <strong>Convidar Amigo</strong>.</span>
-                    </div>`
-              }
-
-              ${
-                isHost
-                  ? `<div class="ak-seg-group" style="margin-top:8px;">
-                      <button type="button" class="ak-seg-btn ak-seg-sm ${room.p2Mode === 'human' ? 'active' : ''}" data-p2-mode="human">
-                        👤 Com Amigo
-                      </button>
-                      <button type="button" class="ak-seg-btn ak-seg-sm ${room.p2Mode === 'bot' ? 'active' : ''}" data-p2-mode="bot">
-                        🤖 Com Bot
-                      </button>
-                    </div>`
-                  : ''
-              }
-            </div>
-          </div>
+          ${versusOrRumbleHtml}
         </div>
 
         <div class="ak-panel">
           ${
-            isHost && room.p2Mode === 'bot'
+            !isRumble && isHost && room.p2Mode === 'bot'
               ? `<div class="ak-seg-group" style="margin-bottom:10px;">
-                  <button type="button" class="ak-seg-btn ${this.lobbyEditingSlot === 'p1' ? 'active' : ''}" data-lobby-slot="p1">
+                  <button type="button" class="ak-seg-btn ${editingSlotKey === 'p1' ? 'active' : ''}" data-lobby-slot="p1">
                     Seu Lutador (P1)
                   </button>
-                  <button type="button" class="ak-seg-btn ${this.lobbyEditingSlot === 'p2' ? 'active' : ''}" data-lobby-slot="p2">
+                  <button type="button" class="ak-seg-btn ${editingSlotKey === 'p2' ? 'active' : ''}" data-lobby-slot="p2">
                     Lutador do Bot (P2)
                   </button>
                 </div>`
-              : ''
+              : isRumble && editingBot
+                ? `<div class="ak-alert-warn" style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+                    <span>Editando lutador do <strong>${editingSlotKey.toUpperCase()} (Bot)</strong></span>
+                    <button type="button" class="ak-btn ak-btn-ghost ak-btn-sm" data-lobby-slot="${mySlotKey ?? 'p1'}">Voltar p/ Meu Lutador</button>
+                  </div>`
+                : ''
           }
 
           <div class="ak-roster-grid">${cardsHtml}</div>
 
           <div class="ak-select-controls" style="margin-top:10px;">
             <div class="ak-field">
-              <label>Fase Inicial (${editingBot ? 'Bot' : 'Você'})</label>
+              <label>Fase Inicial (${editingBot ? `Bot ${editingSlotKey.toUpperCase()}` : 'Você'})</label>
               <div class="ak-seg-group">${phaseButtons}</div>
             </div>
             ${
-              isHost && room.p2Mode === 'bot'
+              isHost && hasAnyBot
                 ? `<div class="ak-field">
-                    <label>Dificuldade do Bot</label>
+                    <label>Dificuldade dos Bots</label>
                     <div class="ak-seg-group">
                       ${diffButtons
                         .map(
@@ -952,23 +1293,17 @@ export class Menus {
             ${
               isHost
                 ? `<div style="font-size:0.8rem;color:var(--ak-muted);">
-                    ${
-                      canStart
-                        ? 'Tudo pronto! Inicie a batalha quando quiser.'
-                        : room.p2Mode === 'human' && !p2Occupied
-                          ? 'Convide um amigo ou mude o P2 para Bot para começar.'
-                          : 'Aguardando o amigo clicar em "Pronto!".'
-                    }
+                    ${escapeHtml(hostStatusHint)}
                   </div>
                   <button id="btn-lobby-start" class="ak-btn ak-btn-primary" type="button" ${canStart ? '' : 'disabled style="opacity:0.45;cursor:not-allowed;"'}>
-                    Iniciar Batalha!
+                    ${isRumble ? 'Iniciar Rumble Arena!' : 'Iniciar Batalha!'}
                   </button>`
-                : isP2Human
+                : mySlot
                   ? `<div style="font-size:0.8rem;color:var(--ak-muted);">
-                      ${room.p2.ready ? 'Você está pronto! Aguardando o líder iniciar...' : 'Escolha seu lutador e clique em Pronto!'}
+                      ${mySlot.ready ? 'Você está pronto! Aguardando o líder iniciar...' : 'Escolha seu lutador e clique em Pronto!'}
                     </div>
-                    <button id="btn-toggle-ready" class="ak-btn ${room.p2.ready ? 'ak-btn-accent' : 'ak-btn-primary'}" type="button">
-                      ${room.p2.ready ? 'Cancelar Pronto' : 'Marcar Pronto!'}
+                    <button id="btn-toggle-ready" class="ak-btn ${mySlot.ready ? 'ak-btn-accent' : 'ak-btn-primary'}" type="button">
+                      ${mySlot.ready ? 'Cancelar Pronto' : 'Marcar Pronto!'}
                     </button>`
                   : ''
             }
@@ -1267,9 +1602,17 @@ export class Menus {
   private renderResultModal(): string {
     if (!this.lastResult) return '';
     const { report, xpSummary, charName } = this.lastResult;
-    const isWin = report.winner === report.localSlot;
-    const isDraw = report.winner === 'draw';
-    const title = isWin ? 'VITÓRIA!' : isDraw ? 'EMPATE' : 'DERROTA';
+    const isDraw = (report.winnerTeam ?? report.winner) === 'draw';
+    const isWin = report.localWon ?? report.winner === report.localSlot;
+    const title = isDraw
+      ? 'EMPATE'
+      : report.roomMode === 'rumble'
+        ? isWin
+          ? 'VITÓRIA DO TIME!'
+          : 'DERROTA DO TIME'
+        : isWin
+          ? 'VITÓRIA!'
+          : 'DERROTA';
     const titleColor = isWin
       ? 'var(--ak-accent)'
       : isDraw
@@ -1287,8 +1630,8 @@ export class Menus {
         <div class="ak-modal" style="text-align:center;">
           <h2 style="margin:0;font-size:2rem;color:${titleColor};">${title}</h2>
           <p style="margin:0;color:var(--ak-muted);">
-            ${escapeHtml(charName)} encerrou na <strong>Fase ${finalPhase}</strong>
-            ${report.opponentLeft ? '<br/><span style="color:var(--ak-cyan);">Oponente desconectou da partida.</span>' : ''}
+            ${escapeHtml(charName)} ${report.roomMode === 'rumble' ? 'lutou no Rumble Arena!' : `encerrou na <strong>Fase ${finalPhase}</strong>`}
+            ${report.opponentLeft ? '<br/><span style="color:var(--ak-cyan);">Adversário desconectou da partida.</span>' : ''}
           </p>
           <div class="ak-panel" style="padding:12px;">
             <div style="font-weight:800;color:var(--ak-cyan);">+${xpSummary.xpGained} XP Obtido</div>
@@ -1514,11 +1857,52 @@ export class Menus {
     });
 
     // Hub de Salas
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-create-preset]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        const preset = el.dataset.createPreset;
+        if (preset === '1v1') {
+          this.createRoomMode = '1v1';
+        } else if (preset === 'rumble-2') {
+          this.createRoomMode = 'rumble';
+          this.createTeamSize = 2;
+        } else {
+          this.createRoomMode = 'rumble';
+          this.createTeamSize = 3;
+        }
+        this.render();
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-create-visibility]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        this.createRoomPublic = el.dataset.createVisibility !== 'private';
+        this.render();
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-create-theme]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        this.createMapTheme = el.dataset.createTheme || 'random';
+        this.render();
+      });
+    });
+
     click('btn-create-room-human', () => {
       const prog = this.save.getCharacterProgress(this.selectedP1);
       this.roomErrorMsg = null;
       this.net.createRoom({
+        roomMode: this.createRoomMode,
+        teamSize: this.createRoomMode === 'rumble' ? this.createTeamSize : 1,
         p2Mode: 'human',
+        isPublic: this.createRoomPublic,
+        mapTheme: this.createMapTheme,
+        fillBots: false,
         charId: this.selectedP1,
         startPhase: Math.min(this.selectedStartPhase, prog.unlockedPhase),
         level: prog.level,
@@ -1528,7 +1912,12 @@ export class Menus {
       const prog = this.save.getCharacterProgress(this.selectedP1);
       this.roomErrorMsg = null;
       this.net.createRoom({
+        roomMode: this.createRoomMode,
+        teamSize: this.createRoomMode === 'rumble' ? this.createTeamSize : 1,
         p2Mode: 'bot',
+        isPublic: this.createRoomPublic,
+        mapTheme: this.createMapTheme,
+        fillBots: this.createRoomMode === 'rumble',
         botDifficulty: this.save.getData().settings.difficulty,
         charId: this.selectedP1,
         startPhase: Math.min(this.selectedStartPhase, prog.unlockedPhase),
@@ -1588,7 +1977,66 @@ export class Menus {
     click('btn-toggle-ready', () => {
       const room = this.net.getCurrentRoom();
       if (!room) return;
-      this.net.updateRoomSelection({ ready: !room.p2.ready });
+      const slots = this.getNormalizedSlots(room);
+      const mySlotKey = this.findActorSlot(room, slots);
+      if (!mySlotKey) return;
+      this.net.updateRoomSelection({ ready: !slots[mySlotKey].ready });
+    });
+    click('btn-switch-team', () => {
+      this.net.updateRoomSelection({ switchTeam: true });
+    });
+    click('btn-reroll-map', () => {
+      this.net.updateRoomConfig({ rerollSeed: true });
+    });
+    click('btn-fill-bots', () => {
+      this.net.updateRoomConfig({ fillBots: true });
+    });
+    click('btn-open-all-human', () => {
+      this.net.updateRoomConfig({ openAllHuman: true });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-room-preset]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        const preset = el.dataset.roomPreset;
+        if (preset === '1v1') {
+          this.net.updateRoomConfig({ roomMode: '1v1', teamSize: 1 });
+        } else if (preset === 'rumble-2') {
+          this.net.updateRoomConfig({ roomMode: 'rumble', teamSize: 2 });
+        } else {
+          this.net.updateRoomConfig({ roomMode: 'rumble', teamSize: 3 });
+        }
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-room-public]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        this.net.updateRoomConfig({ isPublic: el.dataset.roomPublic === 'true' });
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-room-theme]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        this.net.updateRoomConfig({ mapTheme: el.dataset.roomTheme || 'random' });
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-slot-config]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        const [targetSlot, slotMode] = (el.dataset.slotConfig || '').split(':') as [
+          FighterSlotId,
+          SlotMode,
+        ];
+        if (!targetSlot || !slotMode) return;
+        this.net.updateRoomConfig({ targetSlot, slotMode });
+      });
     });
 
     this.uiLayer.querySelectorAll<HTMLElement>('[data-p2-mode]').forEach((el) => {
@@ -1604,7 +2052,7 @@ export class Menus {
       el.addEventListener('click', () => {
         this.audio.unlock();
         this.audio.playSfx('ui');
-        this.lobbyEditingSlot = el.dataset.lobbySlot as 'p1' | 'p2';
+        this.lobbyEditingSlot = el.dataset.lobbySlot as FighterSlotId;
         this.render();
       });
     });
@@ -1616,17 +2064,21 @@ export class Menus {
         const charId = el.dataset.lobbyChar!;
         const room = this.net.getCurrentRoom();
         if (!room) return;
-        const isHost = room.hostId === this.net.getActorId();
-        const editingBot = isHost && room.p2Mode === 'bot' && this.lobbyEditingSlot === 'p2';
+        const slots = this.getNormalizedSlots(room);
+        const actorId = this.net.getActorId();
+        const isHost = room.hostId === actorId;
+        const target = slots[this.lobbyEditingSlot];
+        const editingBot = Boolean(isHost && target && target.isBot);
 
         if (editingBot) {
           this.net.updateRoomSelection({
-            targetSlot: 'p2',
+            targetSlot: this.lobbyEditingSlot,
             charId,
           });
         } else {
           const prog = this.save.getCharacterProgress(charId);
-          const slot = isHost ? room.p1 : room.p2;
+          const myKey = this.findActorSlot(room, slots) ?? 'p1';
+          const slot = slots[myKey];
           const clampedPhase = Math.min(slot.startPhase, prog.unlockedPhase);
           this.net.updateRoomSelection({
             charId,
@@ -1644,10 +2096,12 @@ export class Menus {
         const startPhase = Number(el.dataset.lobbyPhase);
         const room = this.net.getCurrentRoom();
         if (!room) return;
+        const slots = this.getNormalizedSlots(room);
         const isHost = room.hostId === this.net.getActorId();
-        const editingBot = isHost && room.p2Mode === 'bot' && this.lobbyEditingSlot === 'p2';
+        const target = slots[this.lobbyEditingSlot];
+        const editingBot = Boolean(isHost && target && target.isBot);
         this.net.updateRoomSelection({
-          targetSlot: editingBot ? 'p2' : undefined,
+          targetSlot: editingBot ? this.lobbyEditingSlot : undefined,
           startPhase,
         });
       });
@@ -1789,7 +2243,11 @@ export class Menus {
           const prog = this.save.getCharacterProgress(this.selectedP1);
           this.pendingAutoInviteUserId = toUserId;
           this.net.createRoom({
+            roomMode: this.createRoomMode,
+            teamSize: this.createRoomMode === 'rumble' ? this.createTeamSize : 1,
             p2Mode: 'human',
+            isPublic: this.createRoomPublic,
+            mapTheme: this.createMapTheme,
             charId: this.selectedP1,
             startPhase: Math.min(this.selectedStartPhase, prog.unlockedPhase),
             level: prog.level,

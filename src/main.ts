@@ -84,16 +84,28 @@ async function bootstrap(): Promise<void> {
     menus.setActiveMatchMode(config.mode ?? 'solo');
     menus.showLoading(0);
 
-    // Pré-carrega somente a fase inicial de cada lutador para início rápido em 4G
-    await spriteLoader.preloadMatchAssets(
-      [
-        { charId: config.p1CharId, phases: [config.p1StartPhase] },
-        { charId: config.p2CharId, phases: [config.p2StartPhase] },
-      ],
-      (pct) => {
-        menus.showLoading(pct);
+    // Pré-carrega somente a fase inicial de cada lutador participante
+    const preloadByChar = new Map<string, Set<number>>();
+    if (config.participants && config.participants.length > 0) {
+      for (const p of config.participants) {
+        const phases = preloadByChar.get(p.charId) ?? new Set<number>();
+        phases.add(p.startPhase);
+        preloadByChar.set(p.charId, phases);
       }
-    );
+    } else {
+      preloadByChar.set(config.p1CharId, new Set([config.p1StartPhase]));
+      const p2Phases = preloadByChar.get(config.p2CharId) ?? new Set<number>();
+      p2Phases.add(config.p2StartPhase);
+      preloadByChar.set(config.p2CharId, p2Phases);
+    }
+    const preloadRequests = [...preloadByChar.entries()].map(([charId, phases]) => ({
+      charId,
+      phases: [...phases],
+    }));
+
+    await spriteLoader.preloadMatchAssets(preloadRequests, (pct) => {
+      menus.showLoading(pct);
+    });
 
     menus.hideAll();
     pwa.setInCombat(true);
@@ -151,6 +163,9 @@ async function bootstrap(): Promise<void> {
   net.on('opponentLeft', () => {
     arena.handleOpponentLeft();
   });
+  net.on('playerLeft', ({ slot, username }) => {
+    arena.handlePlayerLeft(slot, username);
+  });
 
   arena.setCallbacks(
     () => {
@@ -164,13 +179,18 @@ async function bootstrap(): Promise<void> {
     (report) => {
       pwa.setInCombat(false);
       orientationGuard.setCombatActive(false);
+      const localParticipant = lastConfig?.participants?.find(
+        (p) => p.slot === report.localSlot
+      );
       const playedCharId =
-        report.localSlot === 'p2'
+        localParticipant?.charId ??
+        (report.localSlot === 'p2'
           ? (lastConfig?.p2CharId ?? 'luffy')
-          : (lastConfig?.p1CharId ?? 'goku');
+          : (lastConfig?.p1CharId ?? 'goku'));
+      const won = report.localWon ?? report.winner === report.localSlot;
       const xpSummary = save.recordMatchResult(
         playedCharId,
-        report.winner === report.localSlot,
+        won,
         report.xpEarned
       );
       void net.syncProgress();
