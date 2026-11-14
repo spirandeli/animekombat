@@ -157,6 +157,9 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
   const DEFAULT_BOT_CHARS = ['luffy', 'sukuna', 'goku', 'luffy', 'sukuna', 'goku'];
   const VALID_ARENA_THEMES = new Set([
     'random',
+    'brasilia',
+    'pelourinho',
+    'rio-de-janeiro',
     'shrine',
     'volcano',
     'cyber_ruins',

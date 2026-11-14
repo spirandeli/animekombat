@@ -3,6 +3,7 @@ import { AudioManager } from './engine/AudioManager';
 import { GameLoop } from './engine/GameLoop';
 import { InputManager } from './engine/InputManager';
 import { SpriteLoader } from './engine/SpriteLoader';
+import { generateArenaMap, preloadArenaBackground } from './game/ArenaMap';
 import { ArenaScene, MatchConfig } from './game/ArenaScene';
 import { NetworkClient } from './net/NetworkClient';
 import { PwaManager } from './pwa/PwaManager';
@@ -79,38 +80,49 @@ async function bootstrap(): Promise<void> {
   let lastConfig: MatchConfig | null = null;
 
   const startMatchFlow = async (config: MatchConfig) => {
-    lastConfig = config;
+    const seed = config.mapSeed ?? ((Math.floor(Math.random() * 0x7fffffff) >>> 0) || 1337);
+    const resolvedConfig: MatchConfig = { ...config, mapSeed: seed };
+    lastConfig = resolvedConfig;
     manualPause = false;
-    menus.setActiveMatchMode(config.mode ?? 'solo');
+    menus.setActiveMatchMode(resolvedConfig.mode ?? 'solo');
     menus.showLoading(0);
 
     // Pré-carrega somente a fase inicial de cada lutador participante
     const preloadByChar = new Map<string, Set<number>>();
-    if (config.participants && config.participants.length > 0) {
-      for (const p of config.participants) {
+    if (resolvedConfig.participants && resolvedConfig.participants.length > 0) {
+      for (const p of resolvedConfig.participants) {
         const phases = preloadByChar.get(p.charId) ?? new Set<number>();
         phases.add(p.startPhase);
         preloadByChar.set(p.charId, phases);
       }
     } else {
-      preloadByChar.set(config.p1CharId, new Set([config.p1StartPhase]));
-      const p2Phases = preloadByChar.get(config.p2CharId) ?? new Set<number>();
-      p2Phases.add(config.p2StartPhase);
-      preloadByChar.set(config.p2CharId, p2Phases);
+      preloadByChar.set(resolvedConfig.p1CharId, new Set([resolvedConfig.p1StartPhase]));
+      const p2Phases = preloadByChar.get(resolvedConfig.p2CharId) ?? new Set<number>();
+      p2Phases.add(resolvedConfig.p2StartPhase);
+      preloadByChar.set(resolvedConfig.p2CharId, p2Phases);
     }
     const preloadRequests = [...preloadByChar.entries()].map(([charId, phases]) => ({
       charId,
       phases: [...phases],
     }));
 
-    await spriteLoader.preloadMatchAssets(preloadRequests, (pct) => {
-      menus.showLoading(pct);
-    });
+    const previewMap = generateArenaMap(
+      seed,
+      resolvedConfig.roomMode === 'rumble',
+      resolvedConfig.mapTheme
+    );
+
+    await Promise.all([
+      spriteLoader.preloadMatchAssets(preloadRequests, (pct) => {
+        menus.showLoading(pct);
+      }),
+      preloadArenaBackground(previewMap.themeId),
+    ]);
 
     menus.hideAll();
     pwa.setInCombat(true);
     orientationGuard.setCombatActive(true);
-    arena.startMatch(config);
+    arena.startMatch(resolvedConfig);
     syncPauseState();
   };
 

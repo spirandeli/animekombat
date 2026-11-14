@@ -1,4 +1,7 @@
 export type ArenaThemeId =
+  | 'brasilia'
+  | 'pelourinho'
+  | 'rio-de-janeiro'
   | 'shrine'
   | 'volcano'
   | 'cyber_ruins'
@@ -9,6 +12,7 @@ export interface ArenaThemeInfo {
   id: ArenaThemeId;
   name: string;
   subtitle: string;
+  imageSrc?: string;
   accentColor: string;
   skyTop: string;
   skyMid: string;
@@ -20,6 +24,51 @@ export interface ArenaThemeInfo {
 }
 
 export const ARENA_THEMES: ArenaThemeInfo[] = [
+  {
+    id: 'brasilia',
+    name: 'Brasília',
+    subtitle: 'Catedral Metropolitana e Esplanada',
+    imageSrc: '/assets/backgrounds/brasilia.png',
+    accentColor: '#38bdf8',
+    skyTop: '#0b47a1',
+    skyMid: '#1e88e5',
+    skyBottom: '#7dd3fc',
+    floorTop: '#9c8369',
+    floorMid: '#6b5847',
+    floorBottom: '#2d2520',
+    platformStyle: 'stone',
+  },
+  {
+    id: 'pelourinho',
+    name: 'Pelourinho (BA)',
+    subtitle: 'Centro Histórico de Salvador',
+    imageSrc: '/assets/backgrounds/pelourinho.png',
+    accentColor: '#fbbf24',
+    skyTop: '#0b4ca6',
+    skyMid: '#2575d8',
+    skyBottom: '#93c5fd',
+    floorTop: '#7a756f',
+    floorMid: '#4c4845',
+    floorBottom: '#242220',
+    platformStyle: 'wood',
+  },
+  {
+    id: 'rio-de-janeiro',
+    name: 'Rio de Janeiro',
+    subtitle: 'Pão de Açúcar e Cristo Redentor',
+    imageSrc: '/assets/backgrounds/rio-de-janeiro.png',
+    accentColor: '#22d3ee',
+    skyTop: '#08459e',
+    skyMid: '#1d7ae0',
+    skyBottom: '#74c7f7',
+    floorTop: '#967c65',
+    floorMid: '#645243',
+    floorBottom: '#29211b',
+    platformStyle: 'stone',
+  },
+];
+
+const LEGACY_THEMES: ArenaThemeInfo[] = [
   {
     id: 'shrine',
     name: 'Santuário Celeste',
@@ -87,8 +136,10 @@ export const ARENA_THEMES: ArenaThemeInfo[] = [
   },
 ];
 
+const ALL_THEMES: ArenaThemeInfo[] = [...ARENA_THEMES, ...LEGACY_THEMES];
+
 export function getArenaThemeInfo(id?: string): ArenaThemeInfo {
-  const found = ARENA_THEMES.find((t) => t.id === id);
+  const found = ALL_THEMES.find((t) => t.id === id);
   return found ?? ARENA_THEMES[0];
 }
 
@@ -220,8 +271,8 @@ export function generateArenaMap(
   const rng = mulberry32(safeSeed);
 
   const explicitTheme =
-    forcedTheme && forcedTheme !== 'auto'
-      ? ARENA_THEMES.find((t) => t.id === forcedTheme)
+    forcedTheme && forcedTheme !== 'auto' && forcedTheme !== 'random'
+      ? ALL_THEMES.find((t) => t.id === forcedTheme)
       : undefined;
   const theme =
     explicitTheme ?? ARENA_THEMES[Math.floor(rng() * ARENA_THEMES.length)];
@@ -329,28 +380,50 @@ type BgLoadState =
   | { status: 'missing' };
 
 const bgImageCache = new Map<ArenaThemeId, BgLoadState>();
+const bgPromiseCache = new Map<ArenaThemeId, Promise<void>>();
 
-export function preloadArenaBackground(themeId: ArenaThemeId): void {
-  if (typeof Image === 'undefined') return;
-  if (bgImageCache.has(themeId)) return;
+export function isArenaBackgroundLoaded(themeId: ArenaThemeId): boolean {
+  return bgImageCache.get(themeId)?.status === 'loaded';
+}
 
+export function preloadArenaBackground(themeId: ArenaThemeId): Promise<void> {
+  if (typeof Image === 'undefined') return Promise.resolve();
+  const cachedPromise = bgPromiseCache.get(themeId);
+  if (cachedPromise) return cachedPromise;
+
+  const theme = getArenaThemeInfo(themeId);
   bgImageCache.set(themeId, { status: 'loading' });
 
-  const tryLoad = (ext: 'webp' | 'png', onFail: () => void) => {
-    const img = new Image();
-    img.decoding = 'async';
-    img.onload = () => {
-      bgImageCache.set(themeId, { status: 'loaded', image: img });
+  const loadPromise = new Promise<void>((resolve) => {
+    const loadSrc = (src: string, onFail: () => void) => {
+      const img = new Image();
+      img.decoding = 'async';
+      img.onload = () => {
+        bgImageCache.set(themeId, { status: 'loaded', image: img });
+        resolve();
+      };
+      img.onerror = onFail;
+      img.src = src;
     };
-    img.onerror = onFail;
-    img.src = `/assets/backgrounds/${themeId}.${ext}`;
-  };
 
-  tryLoad('webp', () => {
-    tryLoad('png', () => {
-      bgImageCache.set(themeId, { status: 'missing' });
+    if (theme.imageSrc) {
+      loadSrc(theme.imageSrc, () => {
+        bgImageCache.set(themeId, { status: 'missing' });
+        resolve();
+      });
+      return;
+    }
+
+    loadSrc(`/assets/backgrounds/${themeId}.webp`, () => {
+      loadSrc(`/assets/backgrounds/${themeId}.png`, () => {
+        bgImageCache.set(themeId, { status: 'missing' });
+        resolve();
+      });
     });
   });
+
+  bgPromiseCache.set(themeId, loadPromise);
+  return loadPromise;
 }
 
 export function renderThemeBackground(
@@ -359,10 +432,11 @@ export function renderThemeBackground(
   ch: number,
   camX: number,
   camY: number,
-  map: GeneratedArenaMap
+  map: GeneratedArenaMap,
+  viewScale = 1
 ): void {
   const theme = getArenaThemeInfo(map.themeId);
-  preloadArenaBackground(map.themeId);
+  void preloadArenaBackground(map.themeId);
 
   // 1. Céu gradiente base do bioma
   const sky = ctx.createLinearGradient(0, 0, 0, ch);
@@ -374,24 +448,28 @@ export function renderThemeBackground(
 
   const centerWorld = map.width * 0.5;
   const relCamX = camX - centerWorld;
-  const relCamY = camY - 390;
 
-  // 2. Caso exista imagem personalizada gerada pelo Prompt Mestre em public/assets/backgrounds/
+  // 2. Renderiza a arte de fundo do mapa com parallax e alinhamento de solo
   const cachedBg = bgImageCache.get(map.themeId);
   if (cachedBg?.status === 'loaded') {
     const img = cachedBg.image;
-    const scale = Math.max(cw / img.width, ch / img.height) * 1.16;
+    const parallaxPad = map.isRumble ? 1.18 : 1.08;
+    const scale = Math.max(cw / img.width, ch / img.height) * parallaxPad;
     const drawW = img.width * scale;
     const drawH = img.height * scale;
     const maxPanX = Math.max(0, (drawW - cw) * 0.5);
     const normX = Math.max(-1, Math.min(1, relCamX / Math.max(1, map.width * 0.45)));
     const drawX = (cw - drawW) * 0.5 - normX * maxPanX;
-    const drawY = (ch - drawH) * 0.5 - Math.max(-24, Math.min(24, relCamY * 0.08));
+
+    // Alinha o calçamento inferior (~79% da arte) à projeção de map.groundY na câmera
+    const screenGroundY = ch * 0.56 + (map.groundY - camY) * viewScale;
+    const targetDrawY = screenGroundY - drawH * 0.79;
+    const drawY = Math.max(ch - drawH, Math.min(0, targetDrawY));
 
     ctx.save();
     ctx.drawImage(img, drawX, drawY, drawW, drawH);
-    // Vinheta atmosférica sutil para manter leitura nítida dos personagens
-    ctx.fillStyle = 'rgba(6, 8, 18, 0.22)';
+    // Vinheta atmosférica sutil apenas para contraste dos personagens
+    ctx.fillStyle = 'rgba(6, 10, 22, 0.1)';
     ctx.fillRect(0, 0, cw, ch);
     ctx.restore();
     return;
@@ -555,36 +633,52 @@ export function renderArenaWorld(
   const gy = map.groundY;
   const startX = -500;
   const totalW = map.width + 1000;
+  const hasBgImage = isArenaBackgroundLoaded(map.themeId);
 
-  // Piso principal contínuo
-  const floorGrad = ctx.createLinearGradient(0, gy, 0, gy + 260);
-  floorGrad.addColorStop(0, theme.floorTop);
-  floorGrad.addColorStop(0.24, theme.floorMid);
-  floorGrad.addColorStop(1, theme.floorBottom);
-  ctx.fillStyle = floorGrad;
-  ctx.fillRect(startX, gy, totalW, 340);
+  if (hasBgImage) {
+    // Preserva o piso ilustrado da imagem, adicionando apenas sombra sutil e linha-guia do solo
+    const shadeGrad = ctx.createLinearGradient(0, gy, 0, gy + 36);
+    shadeGrad.addColorStop(0, 'rgba(6, 10, 22, 0.24)');
+    shadeGrad.addColorStop(1, 'rgba(6, 10, 22, 0)');
+    ctx.fillStyle = shadeGrad;
+    ctx.fillRect(startX, gy, totalW, 36);
 
-  // Borda luminosa energética do piso
-  ctx.fillStyle = theme.accentColor;
-  ctx.fillRect(startX, gy - 2, totalW, 4);
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = theme.accentColor;
+    ctx.fillRect(startX, gy - 1, totalW, 3);
+    ctx.restore();
+  } else {
+    // Piso principal contínuo (fallback procedural)
+    const floorGrad = ctx.createLinearGradient(0, gy, 0, gy + 260);
+    floorGrad.addColorStop(0, theme.floorTop);
+    floorGrad.addColorStop(0.24, theme.floorMid);
+    floorGrad.addColorStop(1, theme.floorBottom);
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(startX, gy, totalW, 340);
 
-  // Linhas de perspectiva no solo
-  ctx.strokeStyle = `${theme.accentColor}2b`;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  const center = map.width * 0.5;
-  for (let x = 0; x <= map.width; x += 90) {
-    ctx.moveTo(x, gy);
-    ctx.lineTo((x - center) * 1.35 + center, gy + 210);
+    // Borda luminosa energética do piso
+    ctx.fillStyle = theme.accentColor;
+    ctx.fillRect(startX, gy - 2, totalW, 4);
+
+    // Linhas de perspectiva no solo
+    ctx.strokeStyle = `${theme.accentColor}2b`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const center = map.width * 0.5;
+    for (let x = 0; x <= map.width; x += 90) {
+      ctx.moveTo(x, gy);
+      ctx.lineTo((x - center) * 1.35 + center, gy + 210);
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
 
   // Barreiras laterais da arena
   ctx.save();
-  ctx.fillStyle = 'rgba(255, 59, 92, 0.32)';
+  ctx.fillStyle = hasBgImage ? 'rgba(255, 59, 92, 0.24)' : 'rgba(255, 59, 92, 0.32)';
   ctx.fillRect(map.arenaLeft - 14, gy - 380, 8, 380);
   ctx.fillRect(map.arenaRight + 6, gy - 380, 8, 380);
-  ctx.fillStyle = 'rgba(255, 59, 92, 0.1)';
+  ctx.fillStyle = hasBgImage ? 'rgba(255, 59, 92, 0.06)' : 'rgba(255, 59, 92, 0.1)';
   ctx.fillRect(map.arenaLeft - 220, gy - 380, 206, 380);
   ctx.fillRect(map.arenaRight + 14, gy - 380, 206, 380);
   ctx.restore();

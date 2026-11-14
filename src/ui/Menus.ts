@@ -76,6 +76,7 @@ export class Menus {
   private createTeamSize: 2 | 3 = 3;
   private createRoomPublic = true;
   private createMapTheme = 'random';
+  private selectedMapTheme = 'random';
 
   // Estado de formulários e feedback (preservado entre re-renders)
   private authTab: 'login' | 'register' = 'login';
@@ -341,7 +342,26 @@ export class Menus {
       difficulty,
       mode: 'solo',
       localSlot: 'p1',
+      mapTheme: this.selectedMapTheme,
+      mapSeed: (Math.floor(Math.random() * 0x7fffffff) >>> 0) || 1337,
     };
+  }
+
+  private renderThemePillsHtml(dataAttr: string, selectedTheme?: string): string {
+    const current = selectedTheme || 'random';
+    return `
+      <div class="ak-seg-group ak-theme-pills">
+        <button type="button" class="ak-seg-btn ak-seg-sm ${current === 'random' ? 'active' : ''}" ${dataAttr}="random">
+          🎲 Aleatório
+        </button>
+        ${ARENA_THEMES.map(
+          (t) => `
+          <button type="button" class="ak-seg-btn ak-seg-sm ${current === t.id ? 'active' : ''}" ${dataAttr}="${t.id}">
+            ${escapeHtml(t.name)}
+          </button>`
+        ).join('')}
+      </div>
+    `;
   }
 
   private render(): void {
@@ -645,6 +665,11 @@ export class Menus {
             </div>
           </div>
 
+          <div class="ak-field" style="margin-top:10px;">
+            <label>Cenário / Plano de Fundo</label>
+            ${this.renderThemePillsHtml('data-pick-theme', this.selectedMapTheme)}
+          </div>
+
           <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:space-between;">
             <div style="font-size:0.78rem;color:var(--ak-muted);">
               <strong>Golpes F${this.selectedStartPhase}:</strong>
@@ -732,7 +757,7 @@ export class Menus {
               const maxP = r.maxPlayers ?? (isRumble ? (r.teamSize ?? 3) * 2 : 2);
               const occ = r.occupiedCount ?? (r.hasFreeSlot ? 1 : maxP);
               const themeLabel =
-                isRumble && r.mapTheme && r.mapTheme !== 'random'
+                r.mapTheme && r.mapTheme !== 'random'
                   ? ` · ${getArenaThemeInfo(r.mapTheme).name}`
                   : '';
               return `
@@ -822,24 +847,10 @@ export class Menus {
               </div>
             </div>
 
-            ${
-              this.createRoomMode === 'rumble'
-                ? `<div class="ak-field">
-                    <label>Ambiente / Plano de Fundo da Arena</label>
-                    <div class="ak-seg-group ak-theme-pills">
-                      <button type="button" class="ak-seg-btn ak-seg-sm ${this.createMapTheme === 'random' ? 'active' : ''}" data-create-theme="random">
-                        🎲 Aleatório
-                      </button>
-                      ${ARENA_THEMES.map(
-                        (t) => `
-                        <button type="button" class="ak-seg-btn ak-seg-sm ${this.createMapTheme === t.id ? 'active' : ''}" data-create-theme="${t.id}">
-                          ${escapeHtml(t.name)}
-                        </button>`
-                      ).join('')}
-                    </div>
-                  </div>`
-                : ''
-            }
+            <div class="ak-field">
+              <label>Cenário / Plano de Fundo da Arena</label>
+              ${this.renderThemePillsHtml('data-create-theme', this.createMapTheme)}
+            </div>
           </div>
 
           <div class="ak-rooms-actions">
@@ -959,6 +970,48 @@ export class Menus {
       !room.mapTheme || room.mapTheme === 'random'
         ? 'Aleatório (por Seed)'
         : getArenaThemeInfo(room.mapTheme).name;
+
+    const roomMapToolbarHtml = `
+      <div class="ak-rumble-toolbar">
+        <div class="ak-rumble-map-meta">
+          <span class="ak-mini-badge amber">CENÁRIO: ${escapeHtml(themeName)}</span>
+          <span class="ak-profile-sub">Seed #${room.mapSeed ?? 1337}</span>
+        </div>
+        <div class="ak-rumble-toolbar-btns">
+          ${
+            isRumble && mySlotKey
+              ? `<button id="btn-switch-team" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                  ⇄ Trocar de Time
+                </button>`
+              : ''
+          }
+          ${
+            isHost
+              ? `<button id="btn-reroll-map" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                  🎲 Sortear Mapa
+                </button>
+                ${
+                  isRumble
+                    ? `<button id="btn-fill-bots" class="ak-btn ak-btn-cyan ak-btn-sm" type="button">
+                        🤖 Preencher c/ Bots
+                      </button>
+                      <button id="btn-open-all-human" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                        👥 Abrir Vagas
+                      </button>`
+                    : ''
+                }`
+              : ''
+          }
+        </div>
+      </div>
+      ${
+        isHost
+          ? `<div style="margin-top:8px;">
+              ${this.renderThemePillsHtml('data-room-theme', room.mapTheme || 'random')}
+            </div>`
+          : ''
+      }
+    `;
 
     let versusOrRumbleHtml = '';
     let canStart = false;
@@ -1127,51 +1180,6 @@ export class Menus {
       };
 
       versusOrRumbleHtml = `
-        <div class="ak-rumble-toolbar">
-          <div class="ak-rumble-map-meta">
-            <span class="ak-mini-badge amber">MAPA: ${escapeHtml(themeName)}</span>
-            <span class="ak-profile-sub">Seed #${room.mapSeed ?? 1337}</span>
-          </div>
-          <div class="ak-rumble-toolbar-btns">
-            ${
-              mySlotKey
-                ? `<button id="btn-switch-team" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-                    ⇄ Trocar de Time
-                  </button>`
-                : ''
-            }
-            ${
-              isHost
-                ? `<button id="btn-reroll-map" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-                    🎲 Sortear Mapa
-                  </button>
-                  <button id="btn-fill-bots" class="ak-btn ak-btn-cyan ak-btn-sm" type="button">
-                    🤖 Preencher c/ Bots
-                  </button>
-                  <button id="btn-open-all-human" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-                    👥 Abrir Vagas
-                  </button>`
-                : ''
-            }
-          </div>
-        </div>
-
-        ${
-          isHost
-            ? `<div class="ak-seg-group ak-theme-pills" style="margin-top:8px;">
-                <button type="button" class="ak-seg-btn ak-seg-sm ${!room.mapTheme || room.mapTheme === 'random' ? 'active' : ''}" data-room-theme="random">
-                  🎲 Aleatório
-                </button>
-                ${ARENA_THEMES.map(
-                  (t) => `
-                  <button type="button" class="ak-seg-btn ak-seg-sm ${room.mapTheme === t.id ? 'active' : ''}" data-room-theme="${t.id}">
-                    ${escapeHtml(t.name)}
-                  </button>`
-                ).join('')}
-              </div>`
-            : ''
-        }
-
         <div class="ak-rumble-lobby-grid">
           <div class="ak-rumble-team-col t1">
             <div class="ak-team-col-title blue">TIME AZUL (${t1Active}/${team1Ids.length})</div>
@@ -1240,6 +1248,8 @@ export class Menus {
               ? `<div class="ak-alert-err" style="margin-top:8px;">${escapeHtml(this.roomErrorMsg)}</div>`
               : ''
           }
+
+          ${roomMapToolbarHtml}
 
           ${versusOrRumbleHtml}
         </div>
@@ -2328,6 +2338,16 @@ export class Menus {
         this.audio.unlock();
         this.audio.playSfx('ui');
         this.selectedStartPhase = ph;
+        this.render();
+      });
+    });
+
+    // Cenário / plano de fundo (Modo Solo)
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-pick-theme]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        this.selectedMapTheme = el.dataset.pickTheme || 'random';
         this.render();
       });
     });

@@ -41,6 +41,20 @@ export default defineConfig({
               },
             },
           },
+          {
+            urlPattern: /\/assets\/backgrounds\/.*\.(webp|png|jpg)$/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'ak-background-assets-v1',
+              expiration: {
+                maxEntries: 20,
+                maxAgeSeconds: 60 * 60 * 24 * 30,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
         ],
       },
       devOptions: {

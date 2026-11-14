@@ -257,7 +257,7 @@ export class ArenaScene {
 
     const seed = config.mapSeed ?? ((Math.floor(Math.random() * 0x7fffffff) >>> 0) || 1337);
     this.arenaMap = generateArenaMap(seed, this.roomMode === 'rumble', config.mapTheme);
-    preloadArenaBackground(this.arenaMap.themeId);
+    void preloadArenaBackground(this.arenaMap.themeId);
 
     const participants: MatchParticipantConfig[] =
       config.participants && config.participants.length >= 2
@@ -949,7 +949,7 @@ export class ArenaScene {
         : 0;
 
     // 1. Céu / Plano de fundo temático
-    renderThemeBackground(ctx, cw, ch, this.camX, this.camY, this.arenaMap);
+    renderThemeBackground(ctx, cw, ch, this.camX, this.camY, this.arenaMap, viewScale);
 
     // 2. Mundo da Arena transformado pela câmera
     ctx.save();
