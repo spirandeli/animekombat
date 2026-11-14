@@ -162,6 +162,12 @@ export class Menus {
       }
     });
 
+    this.net.on('progressSynced', () => {
+      if (this.currentScreen !== 'none' && !this.isTypingInInput()) {
+        this.render();
+      }
+    });
+
     this.net.on('wsStatusChanged', () => {
       if (this.currentScreen !== 'none' && !this.isTypingInInput()) {
         this.render();

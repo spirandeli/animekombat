@@ -119,15 +119,19 @@ export class GameStore {
 
   persist() {
     const snapshot = JSON.stringify(this.state, null, 2);
-    this.writeQueue = this.writeQueue.then(async () => {
-      const dir = path.dirname(this.dbPath);
-      await fsp.mkdir(dir, { recursive: true });
-      const tmpPath = `${this.dbPath}.${process.pid}.${Date.now()}.${Math.random()
-        .toString(36)
-        .slice(2, 7)}.tmp`;
-      await fsp.writeFile(tmpPath, snapshot, 'utf8');
-      await fsp.rename(tmpPath, this.dbPath);
-    });
+    this.writeQueue = this.writeQueue
+      .then(async () => {
+        const dir = path.dirname(this.dbPath);
+        await fsp.mkdir(dir, { recursive: true });
+        const tmpPath = `${this.dbPath}.${process.pid}.${Date.now()}.${Math.random()
+          .toString(36)
+          .slice(2, 7)}.tmp`;
+        await fsp.writeFile(tmpPath, snapshot, 'utf8');
+        await fsp.rename(tmpPath, this.dbPath);
+      })
+      .catch((err) => {
+        console.error('[GameStore persist error]', err);
+      });
     return this.writeQueue;
   }
 

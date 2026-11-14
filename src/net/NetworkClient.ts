@@ -178,6 +178,7 @@ export interface CombatEventPayload {
 
 export interface NetworkEventMap {
   authChanged: UserProfile | null;
+  progressSynced: Record<string, CharacterProgress>;
   wsStatusChanged: boolean;
   friendsUpdated: void;
   roomsListUpdated: OpenRoomSummary[];
@@ -309,6 +310,9 @@ export class NetworkClient {
   private reconnectAttempts = 0;
   private pingTimer: number | null = null;
   private manualClose = false;
+  private syncInFlight: Promise<boolean> | null = null;
+  private pendingProgressSync = false;
+  private lastSyncAt = 0;
 
   private currentRoom: RoomState | null = null;
   private openRooms: OpenRoomSummary[] = [];
@@ -331,6 +335,28 @@ export class NetworkClient {
     this.token = this.readToken();
     this.clientActorId = this.getOrCreateGuestId();
     this.setupLocalChannel();
+    this.bindLifecycleSync();
+  }
+
+  private bindLifecycleSync(): void {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => {
+        if (this.token) {
+          void this.syncProgress();
+        }
+      });
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (
+          document.visibilityState === 'visible' &&
+          this.token &&
+          (this.pendingProgressSync || Date.now() - this.lastSyncAt > 5000)
+        ) {
+          void this.syncProgress();
+        }
+      });
+    }
   }
 
   public on<K extends keyof NetworkEventMap>(
@@ -471,24 +497,41 @@ export class NetworkClient {
     return res.user;
   }
 
-  public async syncProgress(): Promise<void> {
-    if (!this.token) return;
-    try {
-      const res = await this.apiFetch<{
-        characters: Record<string, CharacterProgress>;
-      }>('/api/profile/sync', {
-        method: 'POST',
-        body: JSON.stringify({
-          characters: this.save.getData().characters,
-        }),
-      });
-      this.save.mergeRemoteProgress(res.characters);
-      if (this.user) {
-        this.user.characters = res.characters;
+  public async syncProgress(): Promise<boolean> {
+    if (!this.token) return false;
+    if (this.syncInFlight) return this.syncInFlight;
+
+    this.pendingProgressSync = true;
+    const task = (async () => {
+      try {
+        const res = await this.apiFetch<{
+          characters: Record<string, CharacterProgress>;
+        }>('/api/profile/sync', {
+          method: 'POST',
+          body: JSON.stringify({
+            characters: this.save.getData().characters,
+          }),
+        });
+        this.pendingProgressSync = false;
+        this.lastSyncAt = Date.now();
+        const changed = this.save.mergeRemoteProgress(res.characters);
+        if (this.user) {
+          this.user.characters = res.characters;
+        }
+        if (changed) {
+          this.emit('progressSynced', res.characters);
+        }
+        return changed;
+      } catch {
+        // Mantém pendingProgressSync = true para tentar novamente ao reconectar/voltar online
+        return false;
+      } finally {
+        this.syncInFlight = null;
       }
-    } catch {
-      // Ignora offline para manter progresso local intacto
-    }
+    })();
+
+    this.syncInFlight = task;
+    return task;
   }
 
   public async fetchFriends(): Promise<FriendsOverview> {
@@ -576,6 +619,12 @@ export class NetworkClient {
         this.reconnectAttempts = 0;
         this.emit('wsStatusChanged', true);
         this.startPing();
+        if (
+          this.token &&
+          (this.pendingProgressSync || Date.now() - this.lastSyncAt > 5000)
+        ) {
+          void this.syncProgress();
+        }
       });
 
       ws.addEventListener('message', (ev) => {
@@ -1311,7 +1360,12 @@ export class NetworkClient {
       // Resposta vazia ou não-JSON
     }
 
-    if (res.status === 401 && path === '/api/auth/me') {
+    if (
+      res.status === 401 &&
+      this.token &&
+      path !== '/api/auth/login' &&
+      path !== '/api/auth/register'
+    ) {
       this.token = null;
       this.user = null;
       this.writeToken(null);
