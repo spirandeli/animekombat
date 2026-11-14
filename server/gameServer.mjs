@@ -154,7 +154,7 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
   }
 
   const ALL_SLOTS = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'];
-  const DEFAULT_BOT_CHARS = ['luffy', 'sukuna', 'goku', 'luffy', 'sukuna', 'goku'];
+  const DEFAULT_BOT_CHARS = ['luffy', 'sukuna', 'goku', 'naruto', 'luffy', 'sukuna'];
   const VALID_ARENA_THEMES = new Set([
     'random',
     'brasilia',

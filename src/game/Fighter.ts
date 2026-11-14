@@ -362,6 +362,10 @@ export class Fighter {
       if (action === 'ataque_1') return { ...base, rangeW: 130 };
       if (action === 'ataque_2') return { ...base, rangeW: 150 };
       if (action === 'ataque_4') return { ...base, rangeW: 240, rangeH: 150 };
+    } else if (this.charId === 'naruto') {
+      if (action === 'ataque_1') return { ...base, rangeW: 132 };
+      if (action === 'ataque_2') return { ...base, rangeW: 155 };
+      if (action === 'ataque_4') return { ...base, rangeW: 240, rangeH: 150 };
     }
     return base;
   }

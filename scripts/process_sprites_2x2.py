@@ -18,7 +18,7 @@ OUT_DIR = ROOT / "public" / "assets" / "characters"
 ICONS_DIR = ROOT / "public" / "icons"
 
 DIRECTIONAL_ATTACK_PATTERNS = [
-    (re.compile(rf"^(?:ataque|atk)_{n}(?:_.*)?_(?:{pat})(?:_|$)"), f"ataque_{n}_{suffix}")
+    (re.compile(rf"^(?:ataque|atk|attack)_?{n}(?:_.*)?_(?:{pat})(?:_|$)"), f"ataque_{n}_{suffix}")
     for n in range(1, 5)
     for pat, suffix in (
         ("diag_?up|diagonal_?up", "diag_up"),
@@ -31,10 +31,10 @@ DIRECTIONAL_ATTACK_PATTERNS = [
 ACTION_MAP_PATTERNS = [
     (re.compile(r"^idle$"), "idle"),
     *DIRECTIONAL_ATTACK_PATTERNS,
-    (re.compile(r"^(?:ataque|atk)_1(?:_|$)"), "ataque_1"),
-    (re.compile(r"^(?:ataque|atk)_2(?:_|$)"), "ataque_2"),
-    (re.compile(r"^(?:ataque|atk)_3(?:_|$)"), "ataque_3"),
-    (re.compile(r"^(?:ataque|atk)_4(?:_|$)"), "ataque_4"),
+    (re.compile(r"^(?:ataque|atk|attack)_?1(?:_|$)"), "ataque_1"),
+    (re.compile(r"^(?:ataque|atk|attack)_?2(?:_|$)"), "ataque_2"),
+    (re.compile(r"^(?:ataque|atk|attack)_?3(?:_|$)"), "ataque_3"),
+    (re.compile(r"^(?:ataque|atk|attack)_?4(?:_|$)"), "ataque_4"),
     (re.compile(r"^(?:move_)?(?:run|run_dash|air_dash)$"), "run"),
     (re.compile(r"^(?:move_)?jump$"), "jump"),
     (re.compile(r"^(?:move_)?crouch$"), "crouch"),
@@ -43,10 +43,10 @@ ACTION_MAP_PATTERNS = [
 ]
 
 VFX_MAP_PATTERNS = [
-    (re.compile(r"^vfx_(?:ataque|atk)_1(?:_|$)"), "vfx_ataque_1"),
-    (re.compile(r"^vfx_(?:ataque|atk)_2(?:_|$)"), "vfx_ataque_2"),
-    (re.compile(r"^vfx_(?:ataque|atk)_3(?:_|$)"), "vfx_ataque_3"),
-    (re.compile(r"^vfx_(?:ataque|atk)_4(?:_|$)"), "vfx_ataque_4"),
+    (re.compile(r"^vfx_(?:ataque|atk|attack)_?1(?:_|$)"), "vfx_ataque_1"),
+    (re.compile(r"^vfx_(?:ataque|atk|attack)_?2(?:_|$)"), "vfx_ataque_2"),
+    (re.compile(r"^vfx_(?:ataque|atk|attack)_?3(?:_|$)"), "vfx_ataque_3"),
+    (re.compile(r"^vfx_(?:ataque|atk|attack)_?4(?:_|$)"), "vfx_ataque_4"),
 ]
 
 PHASE_COLORS = {
@@ -68,12 +68,19 @@ PHASE_COLORS = {
         ("#818cf8", "Meguna"),
         ("#e11d48", "Era Heian"),
     ],
+    "naruto": [
+        ("#38bdf8", "Normal"),
+        ("#ef4444", "Quatro Caudas"),
+        ("#facc15", "Manto Kurama"),
+        ("#fb7185", "Modo Bárion"),
+    ],
 }
 
 CHAR_DISPLAY_NAMES = {
     "goku": "Son Goku",
     "luffy": "Monkey D. Luffy",
     "sukuna": "Ryomen Sukuna",
+    "naruto": "Naruto Uzumaki",
 }
 
 MOVE_NAME_OVERRIDES = {
@@ -121,7 +128,7 @@ def detect_sheet_layout(stem: str) -> tuple[str, int, int, bool]:
 
 def extract_move_label(stem: str, canonical: str) -> str:
     clean_stem = LAYOUT_TAG_RE.sub("", stem.lower())
-    cleaned = re.sub(r"^(?:vfx_)?(?:ataque|atk)_[1-4]_?", "", clean_stem)
+    cleaned = re.sub(r"^(?:vfx_)?(?:ataque|atk|attack)_?[1-4]_?", "", clean_stem)
     if not cleaned:
         num = canonical.split("_")[-1]
         return f"Golpe {num}"
@@ -131,6 +138,8 @@ def extract_move_label(stem: str, canonical: str) -> str:
 def parse_entry(source_path: Path, internal_path: str, folder_char: str, is_loose: bool = False):
     parts = [p for p in internal_path.replace("\\", "/").split("/") if p]
     if len(parts) < 2:
+        return None
+    if any(p.lower() == "frames_transparent_png" for p in parts[:-1]):
         return None
     filename = parts[-1]
     if not filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
@@ -147,13 +156,13 @@ def parse_entry(source_path: Path, internal_path: str, folder_char: str, is_loos
 
     phase_folder = None
     for part in parts[:-1]:
-        if re.match(r"^fase_[1-4]", part.lower()):
+        if re.match(r"^fase_?[1-4]", part.lower()):
             phase_folder = part.lower()
             break
     if not phase_folder:
         return None
 
-    m_phase = re.match(r"^fase_([1-4])(?:_(.+))?$", phase_folder)
+    m_phase = re.match(r"^fase_?([1-4])(?:_(.+))?$", phase_folder)
     if not m_phase:
         return None
     phase_num = int(m_phase.group(1))
@@ -287,6 +296,51 @@ def _clear_safety_border(rgba: Image.Image, margin: int = 1) -> Image.Image:
                 buf[row_start + x * 4 + 3] = 0
                 buf[row_start + (w - 1 - x) * 4 + 3] = 0
     return Image.frombytes("RGBA", (w, h), bytes(buf))
+
+
+def _strip_grid_border_lines(rgba: Image.Image, depth: int = 4) -> Image.Image:
+    """Remove linhas divisórias escuras residuais (2-4px) nas bordas de células com grade desenhada."""
+    w, h = rgba.size
+    if w <= depth * 4 or h <= depth * 4:
+        return rgba
+    buf = bytearray(rgba.tobytes())
+    changed = False
+
+    def is_dark_row(y: int) -> bool:
+        hits = 0
+        samples = 0
+        row_start = y * w * 4
+        for x in range(0, w, 3):
+            samples += 1
+            i = row_start + x * 4
+            if buf[i + 3] > 128 and buf[i] < 60 and buf[i + 1] < 60 and buf[i + 2] < 60:
+                hits += 1
+        return samples > 0 and (hits / samples) >= 0.65
+
+    def is_dark_col(x: int) -> bool:
+        hits = 0
+        samples = 0
+        for y in range(0, h, 3):
+            samples += 1
+            i = (y * w + x) * 4
+            if buf[i + 3] > 128 and buf[i] < 60 and buf[i + 1] < 60 and buf[i + 2] < 60:
+                hits += 1
+        return samples > 0 and (hits / samples) >= 0.65
+
+    for y in list(range(1, depth)) + list(range(h - depth, h - 1)):
+        if is_dark_row(y):
+            changed = True
+            row_start = y * w * 4
+            for x in range(w):
+                buf[row_start + x * 4 + 3] = 0
+
+    for x in list(range(1, depth)) + list(range(w - depth, w - 1)):
+        if is_dark_col(x):
+            changed = True
+            for y in range(h):
+                buf[(y * w + x) * 4 + 3] = 0
+
+    return Image.frombytes("RGBA", (w, h), bytes(buf)) if changed else rgba
 
 
 def _feather_clipped_edges(rgba: Image.Image, is_vfx: bool) -> tuple[Image.Image, list[str]]:
@@ -631,6 +685,7 @@ def chroma_key_quad(quad: Image.Image, is_vfx: bool) -> tuple[Image.Image, list[
     if is_vfx:
         result = _strip_anomalous_vfx_bg(result)
     result = _clear_safety_border(result, margin=1)
+    result = _strip_grid_border_lines(result)
     return _feather_clipped_edges(result, is_vfx)
 
 
@@ -1144,11 +1199,18 @@ def collect_tasks(src_dir: Path) -> list[dict]:
     for zp_str in zip_files:
         zp = Path(zp_str)
         rel_parts = zp.relative_to(src_dir).parts
-        folder_char = rel_parts[0] if len(rel_parts) > 1 else zp.stem.split("_")[0]
+        default_folder_char = rel_parts[0] if len(rel_parts) > 1 else zp.stem.split("_")[0]
         with zipfile.ZipFile(zp, "r") as zf:
             for name in zf.namelist():
                 if name.endswith("/"):
                     continue
+                name_parts = [p for p in name.replace("\\", "/").split("/") if p]
+                lower_parts = [p.lower() for p in name_parts]
+                folder_char = default_folder_char
+                if "overrides" in lower_parts:
+                    ov_idx = lower_parts.index("overrides")
+                    if ov_idx + 1 < len(name_parts):
+                        folder_char = name_parts[ov_idx + 1]
                 parsed = parse_entry(zp, name, folder_char, is_loose=False)
                 if parsed:
                     prio = 2 if parsed["layout"] == "3x2" else 0
