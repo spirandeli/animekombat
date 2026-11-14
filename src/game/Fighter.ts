@@ -866,13 +866,13 @@ export class Fighter {
     this.ki = isRemote ? Math.max(0, this.ki - spec.kiCost) : this.ki - spec.kiCost;
     this.cooldowns[action] = spec.cooldown;
 
-    // Intervalo global tático (~1s início-a-início) antes de qualquer próximo ataque
+    // Intervalo global tático (~0.7s início-a-início) antes de qualquer próximo ataque
     const postDelayMap: Record<CombatPace, Record<typeof action, number>> = {
       tactical: {
-        ataque_1: 0.58,
-        ataque_2: 0.65,
-        ataque_3: 0.72,
-        ataque_4: 0.90,
+        ataque_1: 0.28,
+        ataque_2: 0.35,
+        ataque_3: 0.42,
+        ataque_4: 0.60,
       },
       classic: {
         ataque_1: 0.14,
