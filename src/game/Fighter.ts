@@ -525,8 +525,10 @@ export class Fighter {
     const shouldEmitTrail =
       this.hp > 0 &&
       (Math.abs(this.vx) > 310 ||
+        this.state === 'ataque_2' ||
         this.state === 'ataque_4' ||
-        this.state === 'evolve');
+        this.state === 'evolve' ||
+        (this.state === 'hitstun' && this.stateTime < 0.14 && Math.abs(this.vx) > 260));
     if (shouldEmitTrail) {
       this.afterimageTimer -= dt;
       if (this.afterimageTimer <= 0) {
@@ -737,8 +739,7 @@ export class Fighter {
         this.facing = input.moveX > 0 ? 1 : -1;
       }
       this.state = 'block';
-      this.vx *= Math.pow(0.002, dt);
-      if (Math.abs(this.vx) < 8) this.vx = 0;
+      this.vx = 0;
       return;
     }
 
@@ -765,14 +766,16 @@ export class Fighter {
         this.facing = input.moveX > 0 ? 1 : -1;
       }
       this.state = 'crouch';
-      this.vx *= Math.pow(0.001, dt);
-      if (Math.abs(this.vx) < 8) this.vx = 0;
+      this.vx = 0;
       return;
     }
 
-    // Movimento horizontal / Corrida / Controle aéreo com damping
+    // Movimento horizontal / Corrida / Controle aéreo com fast-fall
     if (!this.grounded) {
       this.state = 'jump';
+      if (input.down && this.vy > 0) {
+        this.vy += Fighter.GRAVITY * 0.45 * dt;
+      }
       const airSpeed = Fighter.BASE_SPEED * this.getPhaseSpeedMultiplier() * 0.92;
       if (Math.abs(input.moveX) > 0.2) {
         this.facing = input.moveX > 0 ? 1 : -1;
@@ -787,7 +790,7 @@ export class Fighter {
     if (Math.abs(input.moveX) > 0.25) {
       const speed = Fighter.BASE_SPEED * this.getPhaseSpeedMultiplier();
       const targetVx = input.moveX * speed;
-      this.vx += (targetVx - this.vx) * Math.min(1, dt * 18);
+      this.vx += (targetVx - this.vx) * Math.min(1, dt * 26);
       this.facing = input.moveX > 0 ? 1 : -1;
 
       // Evita animação de corrida deslizando no lugar contra a borda da arena
@@ -800,8 +803,8 @@ export class Fighter {
         this.stateTime = 0;
       }
     } else {
-      this.vx *= Math.pow(0.0004, dt);
-      if (Math.abs(this.vx) < 8) this.vx = 0;
+      // Parada imediata ao soltar direcional (elimina deslize / ghost walking)
+      this.vx = 0;
       if (this.state !== 'idle') {
         this.state = 'idle';
         this.stateTime = 0;
@@ -844,15 +847,27 @@ export class Fighter {
       }
     }
 
-    // Encadeamento fluido de combo sem espera global após acertar o golpe
+    // Encadeamento fluido de combo (e jump cancel) após acertar o golpe
     if (
       (this.state === 'ataque_1' || this.state === 'ataque_2') &&
       this.attackHitDone &&
-      progress >= 0.48
+      progress >= 0.42
     ) {
       if (input.justA4 && this.tryStartAttack('ataque_4', input)) return;
       if (input.justA3 && this.tryStartAttack('ataque_3', input)) return;
       if (this.state === 'ataque_1' && input.justA2 && this.tryStartAttack('ataque_2', input)) {
+        return;
+      }
+      if (this.grounded && input.justJump) {
+        this.bufferedAction = null;
+        this.callbacks?.onJumpDust?.(this);
+        this.grounded = false;
+        this.currentPlatformId = null;
+        this.vy = Fighter.JUMP_VEL;
+        this.vx = input.moveX * Fighter.BASE_SPEED * this.getPhaseSpeedMultiplier() * 1.05;
+        this.state = 'jump';
+        this.stateTime = 0;
+        this.callbacks?.onPlaySfx('jump');
         return;
       }
     }
@@ -1086,13 +1101,24 @@ export class Fighter {
       return null;
     }
 
+    // Curva dinâmica de alcance acompanhando extensão e recolhimento do golpe
+    const activeSpan = Math.max(0.01, spec.activeEnd - spec.activeStart);
+    const activeProgress = (progress - spec.activeStart) / activeSpan;
+    const reachFactor =
+      activeProgress < 0.3
+        ? 0.74 + (activeProgress / 0.3) * 0.26
+        : activeProgress > 0.8
+          ? 1 - ((activeProgress - 0.8) / 0.2) * 0.2
+          : 1.0;
+    const effectiveRangeW = Math.round(spec.rangeW * reachFactor);
+
     if (this.charId === 'sukuna' && this.phase === 1 && this.state === 'ataque_4') {
       // Santuário Incompleto atinge em área ao redor do Sukuna
       return {
         rect: {
-          x: this.x - spec.rangeW * 0.6,
+          x: this.x - effectiveRangeW * 0.6,
           y: this.y + spec.offsetY - spec.rangeH * 0.5,
-          w: spec.rangeW * 1.2,
+          w: effectiveRangeW * 1.2,
           h: spec.rangeH,
         },
         spec,
@@ -1105,13 +1131,13 @@ export class Fighter {
           ? {
               x: this.x + 12,
               y: this.y + spec.offsetY - spec.rangeH * 0.5,
-              w: spec.rangeW,
+              w: effectiveRangeW,
               h: spec.rangeH,
             }
           : {
-              x: this.x - 12 - spec.rangeW,
+              x: this.x - 12 - effectiveRangeW,
               y: this.y + spec.offsetY - spec.rangeH * 0.5,
-              w: spec.rangeW,
+              w: effectiveRangeW,
               h: spec.rangeH,
             };
       return { rect, spec };
@@ -1119,7 +1145,7 @@ export class Fighter {
 
     if (this.attackDirY < -0.78) {
       const w = Math.max(88, spec.rangeH * 1.05);
-      const h = spec.rangeW * 1.05;
+      const h = effectiveRangeW * 1.05;
       return {
         rect: {
           x: this.x + this.attackDirX * 20 - w * 0.5,
@@ -1133,7 +1159,7 @@ export class Fighter {
 
     if (this.attackDirY > 0.78) {
       const w = Math.max(88, spec.rangeH * 1.05);
-      const h = spec.rangeW * 1.05;
+      const h = effectiveRangeW * 1.05;
       return {
         rect: {
           x: this.x + this.attackDirX * 20 - w * 0.5,
@@ -1145,16 +1171,16 @@ export class Fighter {
       };
     }
 
-    const centerDist = 18 + spec.rangeW * 0.45;
+    const centerDist = 18 + effectiveRangeW * 0.45;
     const cx = this.x + this.attackDirX * centerDist;
     const cy = this.y - 86 + this.attackDirY * centerDist;
     const w = Math.max(
       spec.rangeH,
-      Math.abs(this.attackDirX) * spec.rangeW * 0.88 + spec.rangeH * 0.45
+      Math.abs(this.attackDirX) * effectiveRangeW * 0.88 + spec.rangeH * 0.45
     );
     const h = Math.max(
       spec.rangeH,
-      Math.abs(this.attackDirY) * spec.rangeW * 0.88 + spec.rangeH * 0.45
+      Math.abs(this.attackDirY) * effectiveRangeW * 0.88 + spec.rangeH * 0.45
     );
     return {
       rect: {
@@ -1225,43 +1251,16 @@ export class Fighter {
   }
 
   private computeNormalizedFrameScale(
-    frame: LoadedFrame,
+    _frame: LoadedFrame,
     action: CanonicalAction,
     refHeight: number
   ): { scale: number; scaleX: number; scaleY: number } {
-    const medianH = this.getActionMedianRawHeight(action);
-    const frameH = Math.max(80, frame.meta.rawH || frame.meta.h || medianH);
-    // Suaviza variação pontual de altura dentro da mesma ação
-    const blendedH = medianH * 0.78 + frameH * 0.22;
-
     let effectiveRefH = refHeight;
     if (this.state === 'crouch') {
+      const medianH = this.getActionMedianRawHeight(action);
       if (medianH >= refHeight * 0.82) {
         effectiveRefH = medianH / 0.78;
-      } else {
-        effectiveRefH = Math.max(refHeight * 0.9, Math.min(refHeight * 1.15, blendedH));
       }
-    } else if (this.state === 'jump') {
-      effectiveRefH = Math.max(refHeight * 0.9, Math.min(refHeight * 1.16, blendedH));
-    } else if (
-      this.state === 'ataque_1' ||
-      this.state === 'ataque_2' ||
-      this.state === 'ataque_3' ||
-      this.state === 'ataque_4' ||
-      this.state === 'evolve'
-    ) {
-      if (blendedH > refHeight * 1.18) {
-        effectiveRefH = Math.min(
-          refHeight * 1.55,
-          refHeight + (blendedH - refHeight) * 0.78
-        );
-      } else if (blendedH < refHeight * 0.86) {
-        effectiveRefH = refHeight * 0.86;
-      } else {
-        effectiveRefH = blendedH;
-      }
-    } else {
-      effectiveRefH = Math.max(refHeight * 0.88, Math.min(refHeight * 1.15, blendedH));
     }
 
     const scale = Fighter.TARGET_BODY_HEIGHT / Math.max(100, effectiveRefH);
@@ -1269,22 +1268,94 @@ export class Fighter {
     let renderScaleY = scale;
 
     if (!this.grounded && this.vy < -320) {
-      renderScaleX = scale * 0.96;
-      renderScaleY = scale * 1.05;
+      renderScaleX = scale * 0.95;
+      renderScaleY = scale * 1.06;
     } else if (this.landingTimer > 0) {
       const landRatio = this.landingTimer / 0.09;
-      renderScaleX = scale * (1 + 0.05 * landRatio);
-      renderScaleY = scale * (1 - 0.04 * landRatio);
+      renderScaleX = scale * (1 + 0.07 * landRatio);
+      renderScaleY = scale * (1 - 0.06 * landRatio);
+    } else if (
+      this.state === 'ataque_2' ||
+      this.state === 'ataque_4'
+    ) {
+      const spec = this.getAttackSpec(this.state);
+      const p = this.stateTime / spec.duration;
+      if (p < spec.activeStart * 0.6) {
+        renderScaleX = scale * 1.04;
+        renderScaleY = scale * 0.96;
+      } else if (p >= spec.activeStart && p <= spec.activeEnd) {
+        renderScaleX = scale * 1.05;
+        renderScaleY = scale * 0.97;
+      }
     }
 
     return { scale, scaleX: renderScaleX, scaleY: renderScaleY };
   }
 
+  private getAttackFrameIndex(
+    spec: AttackSpec,
+    frameCount: number
+  ): number {
+    if (frameCount <= 1) return 0;
+    const progress = Math.min(0.999, Math.max(0, this.stateTime / spec.duration));
+    const startupEndIdx = Math.max(1, Math.floor((frameCount - 1) * 0.25));
+    const activeEndIdx = Math.max(startupEndIdx + 1, Math.floor((frameCount - 1) * 0.72));
+
+    if (progress < spec.activeStart) {
+      const localP = progress / Math.max(0.01, spec.activeStart);
+      return Math.min(startupEndIdx, Math.floor(localP * (startupEndIdx + 1)));
+    }
+    if (progress <= spec.activeEnd) {
+      const span = Math.max(0.01, spec.activeEnd - spec.activeStart);
+      const localP = (progress - spec.activeStart) / span;
+      const activeCount = activeEndIdx - startupEndIdx;
+      return Math.min(
+        activeEndIdx,
+        startupEndIdx + 1 + Math.floor(localP * Math.max(1, activeCount))
+      );
+    }
+    const recSpan = Math.max(0.01, 1 - spec.activeEnd);
+    const localP = (progress - spec.activeEnd) / recSpan;
+    const recCount = frameCount - 1 - activeEndIdx;
+    return Math.min(
+      frameCount - 1,
+      activeEndIdx + 1 + Math.floor(localP * Math.max(1, recCount))
+    );
+  }
+
+  private getActionFrames(action: CanonicalAction): LoadedFrame[] | undefined {
+    const direct = this.phasePack.actions.get(action);
+    if (direct && direct.length > 0) return direct;
+    if (
+      this.phase > 1 &&
+      (action === 'land' ||
+        action === 'dash' ||
+        action === 'knockdown' ||
+        action === 'victory')
+    ) {
+      const f1 = this.spriteLoader.getCachedPhase(this.charId, 1)?.actions.get(action);
+      if (f1 && f1.length > 0) return f1;
+    }
+    return undefined;
+  }
+
   public getCurrentFrame(): LoadedFrame | undefined {
     const action = this.resolveCurrentAction();
 
-    const frames =
-      this.phasePack.actions.get(action) ?? this.phasePack.actions.get('idle');
+    if (this.state === 'idle' && this.grounded && this.landingTimer > 0) {
+      const landFrames = this.getActionFrames('land');
+      if (landFrames && landFrames.length > 0) {
+        const p = Math.min(0.999, Math.max(0, 1 - this.landingTimer / 0.09));
+        return landFrames[Math.min(landFrames.length - 1, Math.floor(p * landFrames.length))];
+      }
+      const jumpFrames = this.getActionFrames('jump');
+      if (jumpFrames && jumpFrames.length > 0) {
+        return jumpFrames[jumpFrames.length - 1];
+      }
+    }
+
+    let frames =
+      this.getActionFrames(action) ?? this.getActionFrames('idle');
     if (!frames || frames.length === 0) return undefined;
 
     let idx = 0;
@@ -1292,7 +1363,14 @@ export class Fighter {
       const fps = frames.length >= 6 ? 8 : 6.5;
       idx = Math.floor(this.stateTime * fps) % frames.length;
     } else if (this.state === 'run') {
-      const fps = frames.length >= 6 ? 13 : 11;
+      const dashFrames =
+        this.stateTime < 0.16 || Math.abs(this.vx) > 295
+          ? this.getActionFrames('dash')
+          : undefined;
+      if (dashFrames && dashFrames.length > 0) {
+        frames = dashFrames;
+      }
+      const fps = frames.length >= 8 ? 15 : frames.length >= 6 ? 13 : 11;
       idx = Math.floor(this.stateTime * fps) % frames.length;
     } else if (this.state === 'jump') {
       if (this.grounded && this.landingTimer > 0) {
@@ -1317,6 +1395,12 @@ export class Fighter {
         idx = this.stateTime < 0.07 ? 0 : Math.min(guardIdx, frames.length - 1);
       }
     } else if (this.state === 'hitstun') {
+      if (this.hp <= 0 || this.comboHitsReceived >= 3 || Math.abs(this.vx) > 320) {
+        const kdFrames = this.getActionFrames('knockdown');
+        if (kdFrames && kdFrames.length > 0) {
+          frames = kdFrames;
+        }
+      }
       const totalStun = Math.max(
         0.18,
         this.stateTime + Math.max(0, this.hitstunRemaining)
@@ -1328,8 +1412,7 @@ export class Fighter {
       idx = Math.floor(this.stateTime * fps) % frames.length;
     } else {
       const spec = this.getAttackSpec(this.state);
-      const progress = Math.min(0.999, this.stateTime / spec.duration);
-      idx = Math.min(frames.length - 1, Math.floor(progress * frames.length));
+      idx = this.getAttackFrameIndex(spec, frames.length);
     }
 
     return frames[idx];
@@ -1436,9 +1519,14 @@ export class Fighter {
       }
     }
 
-    // Desenho do sprite ancorado nos pés com suporte a flipX (facing = -1)
+    // Desenho do sprite ancorado nos pés com suporte a flipX (facing = -1) e tremor de impacto
+    const hitShakeX =
+      this.hp > 0 &&
+      ((this.state === 'hitstun' && this.stateTime < 0.03) || this.blockImpactTimer > 0.11)
+        ? Math.sin(performance.now() * 0.22) * 3.5
+        : 0;
     ctx.save();
-    ctx.translate(this.x, this.y);
+    ctx.translate(this.x + hitShakeX, this.y);
     ctx.scale(this.facing * renderScaleX, renderScaleY);
 
     if (this.hp <= 0) {

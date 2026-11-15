@@ -36,10 +36,14 @@ ACTION_MAP_PATTERNS = [
     (re.compile(r"^(?:ataque|atk|attack)_?3(?:_|$)"), "ataque_3"),
     (re.compile(r"^(?:ataque|atk|attack)_?4(?:_|$)"), "ataque_4"),
     (re.compile(r"^(?:move_)?(?:run|run_dash|air_dash)$"), "run"),
+    (re.compile(r"^(?:move_)?dash$"), "dash"),
     (re.compile(r"^(?:move_)?jump$"), "jump"),
+    (re.compile(r"^(?:move_)?land$"), "land"),
     (re.compile(r"^(?:move_)?crouch$"), "crouch"),
     (re.compile(r"^(?:combat_)?block$"), "block"),
     (re.compile(r"^(?:combat_)?hitstun$"), "hitstun"),
+    (re.compile(r"^(?:combat_)?knockdown(?:_getup)?$"), "knockdown"),
+    (re.compile(r"^victory$"), "victory"),
 ]
 
 VFX_MAP_PATTERNS = [
@@ -220,7 +224,7 @@ def prettify_slug(slug: str) -> str:
 
 
 LAYOUT_TAG_RE = re.compile(
-    r"(?:(?:_|-)(?:3x2|6frames|2x2|2x1|2frames|extra|add2))+$"
+    r"(?:(?:_|-)(?:4x3|12frames|4x2|8frames|3x2|6frames|2x2|2x1|2frames|extra|add2))+$"
 )
 
 EXTRA_INTERLEAVE_ORDER = {
@@ -234,6 +238,10 @@ def detect_sheet_layout(stem: str) -> tuple[str, int, int, bool]:
     """Infere o layout do grid (cols, rows) e se é uma tira extra +2 frames."""
     m = LAYOUT_TAG_RE.search(stem.lower())
     suffix = m.group(0) if m else ""
+    if "4x3" in suffix or "12frames" in suffix:
+        return "4x3", 4, 3, False
+    if "4x2" in suffix or "8frames" in suffix:
+        return "4x2", 4, 2, False
     if "3x2" in suffix or "6frames" in suffix:
         return "3x2", 3, 2, False
     if any(tok in suffix for tok in ("2x1", "2frames", "extra", "add2")):
@@ -275,7 +283,11 @@ def parse_entry(source_path: Path, internal_path: str, folder_char: str, is_loos
             phase_folder = part.lower()
             break
     if not phase_folder:
-        return None
+        lower_parts = [p.lower() for p in parts[:-1]]
+        if any(tag in lower_parts for tag in ("secao_2_1_estruturais", "secao_2_2_expansoes", "expansoes_secao_2")):
+            phase_folder = "fase_1"
+        else:
+            return None
 
     m_phase = re.match(r"^fase_?([1-4])(?:_(.+))?$", phase_folder)
     if not m_phase:
@@ -852,6 +864,51 @@ def _open_sheet_image(task: dict) -> Image.Image:
     return Image.open(io.BytesIO(raw))
 
 
+def _find_grid_splits(im: Image.Image, cols: int, rows: int) -> tuple[list[int], list[int]]:
+    """Encontra divisórias de grade guiadas por vale de projeção ao redor do corte nominal."""
+    w, h = im.size
+    rgb = im.convert("RGB")
+    px = rgb.load()
+    bg = px[0, 0]
+
+    def is_fg(r: int, g: int, b: int) -> bool:
+        return abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2]) > 48
+
+    x_splits = [0]
+    for c in range(1, cols):
+        nom = (w * c) // cols
+        lo = max(1, nom - 28)
+        hi = min(w - 1, nom + 28)
+        best_x = nom
+        best_score = (10**9, 0)
+        for x in range(lo, hi + 1):
+            cnt = sum(1 for y in range(0, h, 3) if is_fg(*px[x, y]))
+            score = (cnt, abs(x - nom))
+            if score < best_score:
+                best_score = score
+                best_x = x
+        x_splits.append(best_x)
+    x_splits.append(w)
+
+    y_splits = [0]
+    for r in range(1, rows):
+        nom = (h * r) // rows
+        lo = max(1, nom - 28)
+        hi = min(h - 1, nom + 28)
+        best_y = nom
+        best_score = (10**9, 0)
+        for y in range(lo, hi + 1):
+            cnt = sum(1 for x in range(0, w, 3) if is_fg(*px[x, y]))
+            score = (cnt, abs(y - nom))
+            if score < best_score:
+                best_score = score
+                best_y = y
+        y_splits.append(best_y)
+    y_splits.append(h)
+
+    return x_splits, y_splits
+
+
 def process_sheet_task(task: dict) -> dict:
     char_id = task["char_id"]
     phase_key = task["phase_key"]
@@ -862,16 +919,15 @@ def process_sheet_task(task: dict) -> dict:
     is_extra = bool(task.get("is_extra", False))
 
     im = _open_sheet_image(task)
-    w, h = im.size
-    qw, qh = w // cols, h // rows
+    x_splits, y_splits = _find_grid_splits(im, cols, rows)
 
     cells: list[tuple[int, int, tuple[int, int, int, int]]] = []
     for r_idx in range(rows):
-        y_top = r_idx * qh
-        y_bot = (r_idx + 1) * qh if r_idx < rows - 1 else h
+        y_top = y_splits[r_idx]
+        y_bot = y_splits[r_idx + 1]
         for c_idx in range(cols):
-            x_left = c_idx * qw
-            x_right = (c_idx + 1) * qw if c_idx < cols - 1 else w
+            x_left = x_splits[c_idx]
+            x_right = x_splits[c_idx + 1]
             cells.append((r_idx, c_idx, (x_left, y_top, x_right, y_bot)))
 
     if is_vfx:
@@ -1315,6 +1371,8 @@ def collect_tasks(src_dir: Path) -> list[dict]:
         zp = Path(zp_str)
         rel_parts = zp.relative_to(src_dir).parts
         default_folder_char = rel_parts[0] if len(rel_parts) > 1 else zp.stem.split("_")[0]
+        is_correcao = "corre" in zp.parent.name.lower() or "padrao_definitivo" in zp.stem.lower()
+        is_correcao_v1 = "(1)" in zp.stem
         with zipfile.ZipFile(zp, "r") as zf:
             for name in zf.namelist():
                 if name.endswith("/"):
@@ -1322,13 +1380,17 @@ def collect_tasks(src_dir: Path) -> list[dict]:
                 name_parts = [p for p in name.replace("\\", "/").split("/") if p]
                 lower_parts = [p.lower() for p in name_parts]
                 folder_char = default_folder_char
-                if "overrides" in lower_parts:
-                    ov_idx = lower_parts.index("overrides")
-                    if ov_idx + 1 < len(name_parts):
-                        folder_char = name_parts[ov_idx + 1]
+                for marker in ("overrides", "secao_2_1_estruturais", "secao_2_2_expansoes", "expansoes_secao_2"):
+                    if marker in lower_parts:
+                        idx = lower_parts.index(marker)
+                        if idx + 1 < len(name_parts):
+                            folder_char = name_parts[idx + 1]
+                        break
                 parsed = parse_entry(zp, name, folder_char, is_loose=False)
                 if parsed:
-                    prio = 2 if parsed["layout"] == "3x2" else 0
+                    layout_bonus = 2 if parsed["layout"] in ("4x3", "4x2") else (1 if parsed["layout"] == "3x2" else 0)
+                    base_prio = 6 if is_correcao_v1 else (4 if is_correcao else 0)
+                    prio = base_prio + layout_bonus
                     register(parsed, prio)
 
     for img_p in loose_imgs:

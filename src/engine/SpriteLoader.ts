@@ -23,10 +23,14 @@ export type CanonicalAction =
   | 'ataque_4_diag_up'
   | 'ataque_4_diag_down'
   | 'run'
+  | 'dash'
   | 'jump'
+  | 'land'
   | 'crouch'
   | 'block'
-  | 'hitstun';
+  | 'hitstun'
+  | 'knockdown'
+  | 'victory';
 
 export type CanonicalVfx =
   | 'vfx_ataque_1'
@@ -284,13 +288,70 @@ export class SpriteLoader {
     const img = await this.fetchImageBitmap(url);
     const w = img.width;
     const h = img.height;
-    const qw = Math.floor(w / cols);
-    const qh = Math.floor(h / rows);
 
-    const rects: Array<[number, number]> = [];
+    const fullCanvas =
+      typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(w, h)
+        : document.createElement('canvas');
+    fullCanvas.width = w;
+    fullCanvas.height = h;
+    const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true }) as
+      | OffscreenCanvasRenderingContext2D
+      | CanvasRenderingContext2D
+      | null;
+    if (!fullCtx) throw new Error('Contexto 2D indisponível para fatiamento.');
+    fullCtx.drawImage(img, 0, 0);
+    const fullData = fullCtx.getImageData(0, 0, w, h).data;
+
+    const isFgPixel = (px: number, py: number): boolean => {
+      const idx = (py * w + px) * 4;
+      const minRb = Math.min(fullData[idx], fullData[idx + 2]);
+      return Math.max(0, minRb - fullData[idx + 1]) < 48;
+    };
+
+    const xSplits = [0];
+    for (let c = 1; c < cols; c++) {
+      const nom = Math.floor((w * c) / cols);
+      let bestX = nom;
+      let bestCount = Infinity;
+      for (let x = Math.max(1, nom - 20); x <= Math.min(w - 1, nom + 20); x++) {
+        let cnt = 0;
+        for (let y = 0; y < h; y += 4) if (isFgPixel(x, y)) cnt++;
+        if (cnt < bestCount || (cnt === bestCount && Math.abs(x - nom) < Math.abs(bestX - nom))) {
+          bestCount = cnt;
+          bestX = x;
+        }
+      }
+      xSplits.push(bestX);
+    }
+    xSplits.push(w);
+
+    const ySplits = [0];
+    for (let r = 1; r < rows; r++) {
+      const nom = Math.floor((h * r) / rows);
+      let bestY = nom;
+      let bestCount = Infinity;
+      for (let y = Math.max(1, nom - 20); y <= Math.min(h - 1, nom + 20); y++) {
+        let cnt = 0;
+        for (let x = 0; x < w; x += 4) if (isFgPixel(x, y)) cnt++;
+        if (cnt < bestCount || (cnt === bestCount && Math.abs(y - nom) < Math.abs(bestY - nom))) {
+          bestCount = cnt;
+          bestY = y;
+        }
+      }
+      ySplits.push(bestY);
+    }
+    ySplits.push(h);
+
+    const rects: Array<[number, number, number, number]> = [];
     for (let ry = 0; ry < rows; ry++) {
       for (let cx = 0; cx < cols; cx++) {
-        rects.push([cx * qw, ry * qh]);
+        rects.push([
+          xSplits[cx],
+          ySplits[ry],
+          xSplits[cx + 1] - xSplits[cx],
+          ySplits[ry + 1] - ySplits[ry],
+        ]);
       }
     }
 
@@ -300,7 +361,7 @@ export class SpriteLoader {
     const spillStart = isVfx ? 16 : 14;
 
     const frames: LoadedFrame[] = [];
-    for (const [sx, sy] of rects) {
+    for (const [sx, sy, qw, qh] of rects) {
       const canvas =
         typeof OffscreenCanvas !== 'undefined'
           ? new OffscreenCanvas(qw, qh)

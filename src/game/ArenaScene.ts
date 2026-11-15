@@ -129,6 +129,7 @@ export class ArenaScene {
   private botSlots = new Set<FighterSlotId>();
   private aiControllers = new Map<FighterSlotId, AIController>();
   private remoteInputs = new Map<FighterSlotId, FighterInputState>();
+  private lastRemoteSyncTimeBySlot = new Map<FighterSlotId, number>();
   private lastRemoteSeqBySlot = new Map<FighterSlotId, number>();
   private seqBySlot = new Map<FighterSlotId, number>();
   private lastSentStateBySlot = new Map<FighterSlotId, string>();
@@ -284,6 +285,7 @@ export class ArenaScene {
     this.botSlots.clear();
     this.aiControllers.clear();
     this.remoteInputs.clear();
+    this.lastRemoteSyncTimeBySlot.clear();
     this.lastRemoteSeqBySlot.clear();
     this.seqBySlot.clear();
     this.lastSentStateBySlot.clear();
@@ -597,6 +599,7 @@ export class ArenaScene {
     }
 
     this.remoteInputs.set(payload.slot, { ...payload.input });
+    this.lastRemoteSyncTimeBySlot.set(payload.slot, performance.now());
   }
 
   public applyRemoteEvent(ev: CombatEventPayload): void {
@@ -670,6 +673,17 @@ export class ArenaScene {
   private consumeRemoteInput(slot: FighterSlotId): FighterInputState {
     const existing = this.remoteInputs.get(slot);
     if (!existing) return createEmptyInput();
+    const lastSync = this.lastRemoteSyncTimeBySlot.get(slot) ?? 0;
+    if (lastSync > 0 && performance.now() - lastSync > 220) {
+      existing.moveX = 0;
+      existing.moveY = 0;
+      existing.left = false;
+      existing.right = false;
+      existing.up = false;
+      existing.down = false;
+      existing.block = false;
+      existing.jump = false;
+    }
     const snap = { ...existing };
     existing.justA1 = false;
     existing.justA2 = false;

@@ -183,6 +183,7 @@ export class InputManager {
     window.addEventListener('keydown', this.handleKeyDown);
     window.addEventListener('keyup', this.handleKeyUp);
     window.addEventListener('blur', this.resetAll);
+    window.addEventListener('focus', this.resetAll);
     window.addEventListener('contextmenu', this.resetAll);
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
     window.addEventListener('pointerdown', this.handleAnyPointerDown, {
@@ -445,19 +446,23 @@ export class InputManager {
     }
     this.prevPause = pauseDown;
 
-    // Prioridade para entrada ativa sem gerar drift quando todas estão soltas
+    // Prioridade: touch ativo > teclado intencional > gamepad (evita drift de controle bloquear teclado)
     const moveX =
-      Math.abs(this.touchAxisX) > 0.01
+      Math.abs(this.touchAxisX) > this.stickDeadzone
         ? this.touchAxisX
-        : Math.abs(gx) > 0.01
-          ? gx
-          : kx;
+        : Math.abs(kx) > 0.01
+          ? kx
+          : Math.abs(gx) > 0.01
+            ? gx
+            : 0;
     const moveY =
-      Math.abs(this.touchAxisY) > 0.01
+      Math.abs(this.touchAxisY) > this.stickDeadzone
         ? this.touchAxisY
-        : Math.abs(gy) > 0.01
-          ? gy
-          : ky;
+        : Math.abs(ky) > 0.01
+          ? ky
+          : Math.abs(gy) > 0.01
+            ? gy
+            : 0;
 
     const left = moveX < -0.3;
     const right = moveX > 0.3;
@@ -530,6 +535,7 @@ export class InputManager {
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('keyup', this.handleKeyUp);
     window.removeEventListener('blur', this.resetAll);
+    window.removeEventListener('focus', this.resetAll);
     window.removeEventListener('contextmenu', this.resetAll);
     document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     window.removeEventListener('pointerdown', this.handleAnyPointerDown);
@@ -701,6 +707,12 @@ export class InputManager {
     }
 
     if (this.isEditableTarget(e.target)) {
+      return;
+    }
+
+    // Atalhos de sistema (Alt/Meta) costumam engolir o keyup; limpa teclas para evitar ghost walking
+    if (e.metaKey || (e.altKey && !e.getModifierState?.('AltGraph'))) {
+      this.keysDown.clear();
       return;
     }
 
