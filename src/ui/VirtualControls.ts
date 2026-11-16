@@ -96,7 +96,9 @@ export class VirtualControls {
     hasKi: Record<'a1' | 'a2' | 'a3' | 'a4', boolean>,
     canEvolve: boolean,
     moveNames: Record<'a1' | 'a2' | 'a3' | 'a4', string>,
-    globalCooldownRatio = 0
+    globalCooldownRatio = 0,
+    dashCooldownRatio = 0,
+    canChainCombo = false
   ): void {
     const attackKeys: Array<'a1' | 'a2' | 'a3' | 'a4'> = ['a1', 'a2', 'a3', 'a4'];
     const globalActive = globalCooldownRatio > 0.01;
@@ -108,6 +110,10 @@ export class VirtualControls {
       if (btn) {
         btn.classList.toggle('insufficient', !hasKi[k]);
         btn.classList.toggle('global-cooldown', globalActive && cooldowns[k] <= 0.01);
+        btn.classList.toggle(
+          'combo-link',
+          canChainCombo && k !== 'a1' && hasKi[k] && cooldowns[k] <= 0.01
+        );
         if (k === 'a4') {
           btn.classList.toggle(
             'ready-ult',
@@ -121,6 +127,16 @@ export class VirtualControls {
       if (subEl && subEl.textContent !== moveNames[k]) {
         subEl.textContent = moveNames[k];
       }
+    }
+
+    const dashBtn = this.buttonEls.get('dash');
+    const dashCdEl = this.cooldownEls.get('dash');
+    const dashCd = Math.max(0, Math.min(1, dashCooldownRatio));
+    if (dashBtn) {
+      dashBtn.classList.toggle('combo-link', canChainCombo && dashCd <= 0.01);
+    }
+    if (dashCdEl) {
+      dashCdEl.style.transform = `scaleY(${dashCd.toFixed(3)})`;
     }
 
     const evoBtn = this.buttonEls.get('evolve');
@@ -162,6 +178,11 @@ export class VirtualControls {
         <button type="button" class="ak-vbtn" data-action="block">
           <span>DEF</span>
           <span class="ak-vbtn-sub">Guarda</span>
+        </button>
+        <button type="button" class="ak-vbtn" data-action="dash">
+          <span>DASH</span>
+          <span class="ak-vbtn-sub">Esquiva</span>
+          <span class="ak-vbtn-cd" data-cd="dash" style="transform:scaleY(0)"></span>
         </button>
         <button type="button" class="ak-vbtn" data-action="jump">
           <span>PULO</span>

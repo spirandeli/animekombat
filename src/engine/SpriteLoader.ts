@@ -23,6 +23,8 @@ export type CanonicalAction =
   | 'ataque_4_diag_up'
   | 'ataque_4_diag_down'
   | 'run'
+  | 'walk'
+  | 'skid'
   | 'dash'
   | 'jump'
   | 'land'
@@ -30,6 +32,13 @@ export type CanonicalAction =
   | 'block'
   | 'hitstun'
   | 'knockdown'
+  | 'getup'
+  | 'evolve'
+  | 'ki_charge'
+  | 'air_ataque_1'
+  | 'grab'
+  | 'throw'
+  | 'pickup'
   | 'victory';
 
 export type CanonicalVfx =
@@ -77,6 +86,15 @@ export interface CharactersManifest {
   characters: Record<string, CharacterManifest>;
 }
 
+export interface MenuCharacterSprites {
+  phases: Record<string, { full?: string; portrait?: string }>;
+}
+
+export interface MenuSpritesManifest {
+  version: number;
+  characters: Record<string, MenuCharacterSprites>;
+}
+
 export interface LoadedFrame {
   image: ImageBitmap | HTMLCanvasElement | HTMLImageElement;
   meta: FrameMeta;
@@ -93,6 +111,7 @@ export interface LoadedPhasePack {
 
 export class SpriteLoader {
   private manifest: CharactersManifest | null = null;
+  private menuManifest: MenuSpritesManifest | null = null;
   private phaseCache = new Map<string, LoadedPhasePack>();
   private loadingPromises = new Map<string, Promise<LoadedPhasePack>>();
   private fallbackCache = new Map<string, LoadedFrame[]>();
@@ -105,6 +124,28 @@ export class SpriteLoader {
     }
     this.manifest = (await res.json()) as CharactersManifest;
     return this.manifest;
+  }
+
+  public async loadMenuManifest(): Promise<MenuSpritesManifest | null> {
+    if (this.menuManifest) return this.menuManifest;
+    try {
+      const res = await fetch('/assets/hud/characters/menu-manifest.json');
+      if (!res.ok) return null;
+      this.menuManifest = (await res.json()) as MenuSpritesManifest;
+      return this.menuManifest;
+    } catch {
+      return null;
+    }
+  }
+
+  public getMenuFullBodyUrl(charId: string, phaseNum: number): string | null {
+    const key = this.getPhaseKey(phaseNum);
+    return this.menuManifest?.characters[charId]?.phases[key]?.full ?? null;
+  }
+
+  public getMenuPortraitUrl(charId: string, phaseNum: number): string | null {
+    const key = this.getPhaseKey(phaseNum);
+    return this.menuManifest?.characters[charId]?.phases[key]?.portrait ?? null;
   }
 
   public getManifest(): CharactersManifest | null {

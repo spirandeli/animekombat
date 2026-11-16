@@ -1,0 +1,185 @@
+{
+  "version": 1,
+  "characters": {
+    "chopper": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/chopper/fase_1_full.png",
+          "portrait": "/assets/hud/characters/chopper/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/chopper/fase_2_full.png",
+          "portrait": "/assets/hud/characters/chopper/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/chopper/fase_3_full.png",
+          "portrait": "/assets/hud/characters/chopper/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/chopper/fase_4_full.png",
+          "portrait": "/assets/hud/characters/chopper/fase_4_portrait.png"
+        }
+      }
+    },
+    "goku": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/goku/fase_1_full.png",
+          "portrait": "/assets/hud/characters/goku/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/goku/fase_2_full.png",
+          "portrait": "/assets/hud/characters/goku/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/goku/fase_3_full.png",
+          "portrait": "/assets/hud/characters/goku/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/goku/fase_4_full.png",
+          "portrait": "/assets/hud/characters/goku/fase_4_portrait.png"
+        }
+      }
+    },
+    "inuyasha": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/inuyasha/fase_1_full.png",
+          "portrait": "/assets/hud/characters/inuyasha/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/inuyasha/fase_2_full.png",
+          "portrait": "/assets/hud/characters/inuyasha/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/inuyasha/fase_3_full.png",
+          "portrait": "/assets/hud/characters/inuyasha/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/inuyasha/fase_4_full.png",
+          "portrait": "/assets/hud/characters/inuyasha/fase_4_portrait.png"
+        }
+      }
+    },
+    "luffy": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/luffy/fase_1_full.png",
+          "portrait": "/assets/hud/characters/luffy/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/luffy/fase_2_full.png",
+          "portrait": "/assets/hud/characters/luffy/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/luffy/fase_3_full.png",
+          "portrait": "/assets/hud/characters/luffy/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/luffy/fase_4_full.png",
+          "portrait": "/assets/hud/characters/luffy/fase_4_portrait.png"
+        }
+      }
+    },
+    "naruto": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/naruto/fase_1_full.png",
+          "portrait": "/assets/hud/characters/naruto/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/naruto/fase_2_full.png",
+          "portrait": "/assets/hud/characters/naruto/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/naruto/fase_3_full.png",
+          "portrait": "/assets/hud/characters/naruto/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/naruto/fase_4_full.png",
+          "portrait": "/assets/hud/characters/naruto/fase_4_portrait.png"
+        }
+      }
+    },
+    "sasuke": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/sasuke/fase_1_full.png",
+          "portrait": "/assets/hud/characters/sasuke/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/sasuke/fase_2_full.png",
+          "portrait": "/assets/hud/characters/sasuke/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/sasuke/fase_3_full.png",
+          "portrait": "/assets/hud/characters/sasuke/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/sasuke/fase_4_full.png",
+          "portrait": "/assets/hud/characters/sasuke/fase_4_portrait.png"
+        }
+      }
+    },
+    "seiya": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/seiya/fase_1_full.png",
+          "portrait": "/assets/hud/characters/seiya/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/seiya/fase_2_full.png",
+          "portrait": "/assets/hud/characters/seiya/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/seiya/fase_3_full.png",
+          "portrait": "/assets/hud/characters/seiya/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/seiya/fase_4_full.png",
+          "portrait": "/assets/hud/characters/seiya/fase_4_portrait.png"
+        }
+      }
+    },
+    "sukuna": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/sukuna/fase_1_full.png",
+          "portrait": "/assets/hud/characters/sukuna/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/sukuna/fase_2_full.png",
+          "portrait": "/assets/hud/characters/sukuna/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/sukuna/fase_3_full.png",
+          "portrait": "/assets/hud/characters/sukuna/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/sukuna/fase_4_full.png",
+          "portrait": "/assets/hud/characters/sukuna/fase_4_portrait.png"
+        }
+      }
+    },
+    "zoro": {
+      "phases": {
+        "fase_1": {
+          "full": "/assets/hud/characters/zoro/fase_1_full.png",
+          "portrait": "/assets/hud/characters/zoro/fase_1_portrait.png"
+        },
+        "fase_2": {
+          "full": "/assets/hud/characters/zoro/fase_2_full.png",
+          "portrait": "/assets/hud/characters/zoro/fase_2_portrait.png"
+        },
+        "fase_3": {
+          "full": "/assets/hud/characters/zoro/fase_3_full.png",
+          "portrait": "/assets/hud/characters/zoro/fase_3_portrait.png"
+        },
+        "fase_4": {
+          "full": "/assets/hud/characters/zoro/fase_4_full.png",
+          "portrait": "/assets/hud/characters/zoro/fase_4_portrait.png"
+        }
+      }
+    }
+  }
+}

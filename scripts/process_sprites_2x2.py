@@ -1508,5 +1508,55 @@ def main():
     )
 
 
+def audit_missing_sprites() -> None:
+    """Audita manifest.json e reporta cortes, ações ausentes por fase e frames abaixo do ideal."""
+    manifest_path = OUT_DIR / "manifest.json"
+    if not manifest_path.exists():
+        print(f"Manifesto não encontrado em {manifest_path}")
+        return
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    chars = manifest.get("characters", {})
+
+    phase_required = ("dash", "land", "knockdown", "victory")
+    complementary = ("getup", "evolve", "ki_charge", "walk")
+
+    print("=== AUDITORIA DE SPRITES (manifest.json) ===")
+    total_clipped = 0
+    for cid, cdata in sorted(chars.items()):
+        char_clipped = 0
+        missing_by_phase: list[str] = []
+        low_frames: list[str] = []
+        missing_comp: list[str] = []
+        for pk, pdata in sorted(cdata.get("phases", {}).items()):
+            acts = pdata.get("actions", {})
+            vfxs = pdata.get("vfx", {})
+            clipped_here = sum(
+                1 for frames in list(acts.values()) + list(vfxs.values())
+                for fr in frames if fr.get("clippedEdges")
+            )
+            char_clipped += clipped_here
+            missing_req = [a for a in phase_required if a not in acts]
+            if missing_req:
+                missing_by_phase.append(f"{pk}:[{','.join(missing_req)}]")
+            if len(acts.get("ataque_4", [])) < 12:
+                low_frames.append(f"{pk}/ataque_4({len(acts.get('ataque_4', []))})")
+            if len(acts.get("jump", [])) < 8:
+                low_frames.append(f"{pk}/jump({len(acts.get('jump', []))})")
+            if pk == "fase_1":
+                missing_comp = [a for a in complementary if a not in acts]
+        total_clipped += char_clipped
+        print(f"- {cid}: clipped={char_clipped}")
+        if missing_by_phase:
+            print(f"    Fases sem dash/land/knockdown/victory: {' | '.join(missing_by_phase)}")
+        if low_frames:
+            print(f"    Abaixo do ideal (ataque_4<12 / jump<8): {', '.join(low_frames)}")
+        if missing_comp:
+            print(f"    Complementares F1 pendentes: {', '.join(missing_comp)}")
+    print(f"Total de frames com clippedEdges: {total_clipped}")
+
+
 if __name__ == "__main__":
-    main()
+    if "--audit-missing" in sys.argv:
+        audit_missing_sprites()
+    else:
+        main()

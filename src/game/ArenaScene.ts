@@ -79,12 +79,14 @@ function createEmptyInput(): FighterInputState {
     a3: false,
     a4: false,
     block: false,
+    dash: false,
     jump: false,
     evolve: false,
     justA1: false,
     justA2: false,
     justA3: false,
     justA4: false,
+    justDash: false,
     justJump: false,
     justEvolve: false,
   };
@@ -197,6 +199,7 @@ export class ArenaScene {
     fps?: HTMLElement;
     cadenceFill?: HTMLElement;
     cadenceTag?: HTMLElement;
+    skillPills?: Record<'a1' | 'a2' | 'a3' | 'a4' | 'dash', HTMLElement | undefined>;
     rumbleSlots?: Map<FighterSlotId, RumbleSlotHudRefs>;
   } = {};
 
@@ -689,6 +692,7 @@ export class ArenaScene {
     existing.justA2 = false;
     existing.justA3 = false;
     existing.justA4 = false;
+    existing.justDash = false;
     existing.justJump = false;
     existing.justEvolve = false;
     return snap;
@@ -702,7 +706,14 @@ export class ArenaScene {
     this.pendingWinner = winner;
     this.pendingWinnerTeam = winnerTeam;
     this.pendingMatchOver = isMatchOver;
-    this.koSlowMoTimer = isMatchOver ? 1.35 : 1.45;
+    this.koSlowMoTimer = isMatchOver ? 1.55 : 1.5;
+    if (winnerTeam !== 'draw') {
+      for (const f of this.fighters) {
+        if (f.team === winnerTeam && f.hp > 0) {
+          f.enterVictory();
+        }
+      }
+    }
     this.combat.triggerScreenShake(16, 0.45);
     const label =
       this.roundTimer <= 0
@@ -785,12 +796,25 @@ export class ArenaScene {
     if (this.pendingWinner !== null) {
       this.koSlowMoTimer -= dt;
       const slowDt = dt * 0.28;
+      const idleInput = createEmptyInput();
+      for (const f of this.fighters) {
+        f.update(slowDt, idleInput, this.fighters, this.arenaMap.platforms);
+      }
       this.combat.updateMulti(
         slowDt,
         this.fighters,
         this.arenaMap.arenaLeft,
         this.arenaMap.arenaRight
       );
+      const winnerAnchor =
+        this.pendingWinnerTeam !== null && this.pendingWinnerTeam !== 'draw'
+          ? this.fighters.find((f) => f.team === this.pendingWinnerTeam && f.hp > 0)
+          : undefined;
+      if (winnerAnchor) {
+        this.camX += (winnerAnchor.x - this.camX) * Math.min(1, dt * 4);
+        this.camY += (winnerAnchor.y - 115 - this.camY) * Math.min(1, dt * 4);
+        this.camZoom += (1.18 - this.camZoom) * Math.min(1, dt * 3);
+      }
       if (this.koSlowMoTimer <= 0 && !this.matchEnded) {
         if (!this.pendingMatchOver) {
           this.startNextRound();
@@ -952,7 +976,9 @@ export class ArenaScene {
       },
       localFighter.canEvolveNow(),
       localFighter.getMoveNames(),
-      localFighter.getGlobalCooldownRatio()
+      localFighter.getGlobalCooldownRatio(),
+      localFighter.dashCooldown / 0.45,
+      localFighter.canChainCombo()
     );
 
     if (this.isHostAuthority()) {
@@ -1413,6 +1439,13 @@ export class ArenaScene {
 
       <div class="ak-combo-banner hidden" id="hud-p1-combo">2 HITS!</div>
       <div class="ak-combo-banner p2 hidden" id="hud-p2-combo">2 HITS!</div>
+      <div class="ak-skills-dock" id="hud-skills-dock">
+        <span class="ak-skill-pill" id="hud-sk-a1" data-sk="a1"><b>A1</b><i></i></span>
+        <span class="ak-skill-pill" id="hud-sk-a2" data-sk="a2"><b>A2</b><i></i></span>
+        <span class="ak-skill-pill" id="hud-sk-a3" data-sk="a3"><b>A3</b><i></i></span>
+        <span class="ak-skill-pill" id="hud-sk-a4" data-sk="a4"><b>ULT</b><i></i></span>
+        <span class="ak-skill-pill" id="hud-sk-dash" data-sk="dash"><b>DASH</b><i></i></span>
+      </div>
       <div class="ak-fps-tag" id="hud-fps">60 FPS</div>
     `;
 
@@ -1439,6 +1472,13 @@ export class ArenaScene {
       fps: q('#hud-fps'),
       cadenceFill: q('#hud-cadence-fill'),
       cadenceTag: q('#hud-cadence-tag'),
+      skillPills: {
+        a1: q('#hud-sk-a1'),
+        a2: q('#hud-sk-a2'),
+        a3: q('#hud-sk-a3'),
+        a4: q('#hud-sk-a4'),
+        dash: q('#hud-sk-dash'),
+      },
     };
 
     this.hudEl.querySelector('#hud-pause-btn')?.addEventListener('click', () => {
@@ -1513,6 +1553,13 @@ export class ArenaScene {
 
       <div class="ak-combo-banner hidden" id="hud-p1-combo">2 HITS!</div>
       <div class="ak-combo-banner p2 hidden" id="hud-p2-combo">2 HITS!</div>
+      <div class="ak-skills-dock" id="hud-skills-dock">
+        <span class="ak-skill-pill" id="hud-sk-a1" data-sk="a1"><b>A1</b><i></i></span>
+        <span class="ak-skill-pill" id="hud-sk-a2" data-sk="a2"><b>A2</b><i></i></span>
+        <span class="ak-skill-pill" id="hud-sk-a3" data-sk="a3"><b>A3</b><i></i></span>
+        <span class="ak-skill-pill" id="hud-sk-a4" data-sk="a4"><b>ULT</b><i></i></span>
+        <span class="ak-skill-pill" id="hud-sk-dash" data-sk="dash"><b>DASH</b><i></i></span>
+      </div>
       <div class="ak-fps-tag" id="hud-fps">60 FPS</div>
     `;
 
@@ -1665,18 +1712,24 @@ export class ArenaScene {
       });
     }
 
+    const formatCombo = (hits: number) => {
+      const tier =
+        hits >= 10 ? ' LENDÁRIO!' : hits >= 6 ? ' BRUTAL!' : hits >= 3 ? ' BOM!' : '';
+      return `${hits} HITS!${tier}`;
+    };
+
     if (this.hudRefs.p1Combo) {
       const show = this.p1ComboFade > 0 && this.p1ComboDisplay >= 2;
       this.hudRefs.p1Combo.classList.toggle('hidden', !show);
       if (show) {
-        this.hudRefs.p1Combo.textContent = `${this.p1ComboDisplay} HITS!`;
+        this.hudRefs.p1Combo.textContent = formatCombo(this.p1ComboDisplay);
       }
     }
     if (this.hudRefs.p2Combo) {
       const show = this.p2ComboFade > 0 && this.p2ComboDisplay >= 2;
       this.hudRefs.p2Combo.classList.toggle('hidden', !show);
       if (show) {
-        this.hudRefs.p2Combo.textContent = `${this.p2ComboDisplay} HITS!`;
+        this.hudRefs.p2Combo.textContent = formatCombo(this.p2ComboDisplay);
       }
     }
 
@@ -1697,6 +1750,33 @@ export class ArenaScene {
       const label = isReady ? 'GOLPE PRONTO' : 'INTERVALO';
       if (this.hudRefs.cadenceTag.textContent !== label) {
         this.hudRefs.cadenceTag.textContent = label;
+      }
+    }
+    if (localFighter && this.hudRefs.skillPills) {
+      const chainReady = localFighter.canChainCombo();
+      const pills: Array<{
+        key: 'a1' | 'a2' | 'a3' | 'a4' | 'dash';
+        cd: number;
+        hasKi: boolean;
+        chain?: boolean;
+      }> = [
+        { key: 'a1', cd: localFighter.cooldowns.ataque_1 / ATTACK_SPECS.ataque_1.cooldown, hasKi: true },
+        { key: 'a2', cd: localFighter.cooldowns.ataque_2 / ATTACK_SPECS.ataque_2.cooldown, hasKi: localFighter.ki >= ATTACK_SPECS.ataque_2.kiCost, chain: chainReady },
+        { key: 'a3', cd: localFighter.cooldowns.ataque_3 / ATTACK_SPECS.ataque_3.cooldown, hasKi: localFighter.ki >= ATTACK_SPECS.ataque_3.kiCost, chain: chainReady },
+        { key: 'a4', cd: localFighter.cooldowns.ataque_4 / ATTACK_SPECS.ataque_4.cooldown, hasKi: localFighter.ki >= ATTACK_SPECS.ataque_4.kiCost, chain: chainReady },
+        { key: 'dash', cd: localFighter.dashCooldown / 0.45, hasKi: true, chain: chainReady },
+      ];
+      for (const p of pills) {
+        const el = this.hudRefs.skillPills[p.key];
+        if (!el) continue;
+        const clamped = Math.max(0, Math.min(1, p.cd));
+        el.classList.toggle('on-cd', clamped > 0.01);
+        el.classList.toggle('no-ki', !p.hasKi);
+        el.classList.toggle('combo-link', Boolean(p.chain && clamped <= 0.01 && p.hasKi));
+        const bar = el.querySelector<HTMLElement>('i');
+        if (bar) {
+          bar.style.transform = `scaleX(${(1 - clamped).toFixed(2)})`;
+        }
       }
     }
   }

@@ -11,6 +11,7 @@ export type BindableAction =
   | 'a3'
   | 'a4'
   | 'block'
+  | 'dash'
   | 'jump'
   | 'evolve'
   | 'pause';
@@ -30,6 +31,7 @@ export function createDefaultKeyBindings(): KeyBindings {
     a3: ['KeyL', 'KeyC'],
     a4: ['KeyU', 'KeyV'],
     block: ['KeyI', 'ShiftRight', 'ShiftLeft'],
+    dash: ['KeyQ', 'KeyO'],
     jump: ['Space'],
     evolve: ['KeyE', 'KeyR'],
     pause: ['Escape', 'KeyP'],
@@ -47,6 +49,7 @@ export function createDefaultGamepadBindings(): GamepadBindings {
     a3: [1],
     a4: [5],
     block: [4, 6],
+    dash: [10],
     jump: [0],
     evolve: [7, 8],
     pause: [9],

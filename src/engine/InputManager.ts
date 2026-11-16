@@ -12,6 +12,7 @@ export type InputAction =
   | 'a3'
   | 'a4'
   | 'block'
+  | 'dash'
   | 'jump'
   | 'evolve';
 
@@ -27,12 +28,14 @@ export interface FighterInputState {
   a3: boolean;
   a4: boolean;
   block: boolean;
+  dash?: boolean;
   jump: boolean;
   evolve: boolean;
   justA1: boolean;
   justA2: boolean;
   justA3: boolean;
   justA4: boolean;
+  justDash?: boolean;
   justJump: boolean;
   justEvolve: boolean;
 }
@@ -53,6 +56,7 @@ export const BINDABLE_ACTION_LABELS: Record<BindableAction, string> = {
   a3: 'Golpe 3 (Projétil / Especial)',
   a4: 'Golpe 4 (Ultimate)',
   block: 'Defesa (Guarda)',
+  dash: 'Dash / Esquiva',
   jump: 'Pular',
   evolve: 'Evoluir Fase',
   pause: 'Pausar / Menu',
@@ -144,11 +148,16 @@ export class InputManager {
     a3: false,
     a4: false,
     block: false,
+    dash: false,
     jump: false,
     evolve: false,
   };
 
   private prevUp = false;
+  private prevLeft = false;
+  private prevRight = false;
+  private lastTapDir: -1 | 0 | 1 = 0;
+  private lastTapAt = 0;
   private prevPause = false;
   private pauseRequested = false;
 
@@ -382,6 +391,10 @@ export class InputManager {
     this.touchAxisY = 0;
     this.touchActions.clear();
     this.prevUp = false;
+    this.prevLeft = false;
+    this.prevRight = false;
+    this.lastTapDir = 0;
+    this.lastTapAt = 0;
     this.pauseRequested = false;
     for (const k of Object.keys(this.prevState) as InputAction[]) {
       this.prevState[k] = false;
@@ -474,8 +487,31 @@ export class InputManager {
     const a3 = this.isActionPressed('a3', gp);
     const a4 = this.isActionPressed('a4', gp);
     const block = this.isActionPressed('block', gp);
+    const dash = this.isActionPressed('dash', gp);
     const jumpBtnPressed = this.isActionPressed('jump', gp);
     const evolve = this.isActionPressed('evolve', gp);
+
+    const now = performance.now();
+    let doubleTapDash = false;
+    if (left && !this.prevLeft) {
+      if (this.lastTapDir === -1 && now - this.lastTapAt <= 220) {
+        doubleTapDash = true;
+        this.lastTapDir = 0;
+      } else {
+        this.lastTapDir = -1;
+        this.lastTapAt = now;
+      }
+    } else if (right && !this.prevRight) {
+      if (this.lastTapDir === 1 && now - this.lastTapAt <= 220) {
+        doubleTapDash = true;
+        this.lastTapDir = 0;
+      } else {
+        this.lastTapDir = 1;
+        this.lastTapAt = now;
+      }
+    }
+    this.prevLeft = left;
+    this.prevRight = right;
 
     const stickJumpJust =
       this.jumpViaStickEnabled &&
@@ -491,6 +527,7 @@ export class InputManager {
     const justA2 = a2 && !this.prevState.a2;
     const justA3 = a3 && !this.prevState.a3;
     const justA4 = a4 && !this.prevState.a4;
+    const justDash = (dash && !this.prevState.dash) || doubleTapDash;
     const justJump =
       (jumpBtnPressed && !this.prevState.jump) || stickJumpJust;
     const justEvolve = evolve && !this.prevState.evolve;
@@ -503,6 +540,7 @@ export class InputManager {
     this.prevState.a3 = a3;
     this.prevState.a4 = a4;
     this.prevState.block = block;
+    this.prevState.dash = dash;
     this.prevState.jump = jumpBtnPressed;
     this.prevState.evolve = evolve;
     this.prevUp = up;
@@ -519,12 +557,14 @@ export class InputManager {
       a3,
       a4,
       block,
+      dash,
       jump: rawJump,
       evolve,
       justA1,
       justA2,
       justA3,
       justA4,
+      justDash,
       justJump,
       justEvolve,
     };
@@ -556,12 +596,14 @@ export class InputManager {
       a3: false,
       a4: false,
       block: false,
+      dash: false,
       jump: false,
       evolve: false,
       justA1: false,
       justA2: false,
       justA3: false,
       justA4: false,
+      justDash: false,
       justJump: false,
       justEvolve: false,
     };

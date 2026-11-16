@@ -1,0 +1,62 @@
+{
+  "character": "seiya",
+  "current_phase": 1,
+  "sheets": {
+    "fase_1/idle/parte_1.png": {
+      "character": "seiya",
+      "phase": 1,
+      "action": "idle",
+      "part": "parte_1",
+      "status": "DONE",
+      "attempts": 1
+    },
+    "fase_1/idle/parte_2.png": {
+      "character": "seiya",
+      "phase": 1,
+      "action": "idle",
+      "part": "parte_2",
+      "status": "DONE",
+      "attempts": 1
+    },
+    "fase_1/run/parte_1.png": {
+      "character": "seiya",
+      "phase": 1,
+      "action": "run",
+      "part": "parte_1",
+      "status": "DONE",
+      "attempts": 1
+    },
+    "fase_1/run/parte_2.png": {
+      "character": "seiya",
+      "phase": 1,
+      "action": "run",
+      "part": "parte_2",
+      "status": "DONE",
+      "attempts": 1
+    },
+    "fase_1/walk/parte_1.png": {
+      "character": "seiya",
+      "phase": 1,
+      "action": "walk",
+      "part": "parte_1",
+      "status": "DONE",
+      "attempts": 1
+    },
+    "fase_1/walk/parte_2.png": {
+      "character": "seiya",
+      "phase": 1,
+      "action": "walk",
+      "part": "parte_2",
+      "status": "DONE",
+      "attempts": 1
+    },
+    "fase_1/jump/parte_1.png": {
+      "character": "seiya",
+      "phase": 1,
+      "action": "jump",
+      "part": "parte_1",
+      "status": "DONE",
+      "attempts": 1
+    }
+  }
+}

@@ -5,7 +5,7 @@ import {
   formatGamepadButton,
   formatKeyCode,
 } from '../engine/InputManager';
-import { CharactersManifest } from '../engine/SpriteLoader';
+import { CharactersManifest, SpriteLoader } from '../engine/SpriteLoader';
 import { AIDifficulty } from '../game/AIController';
 import { ARENA_THEMES, getArenaThemeInfo } from '../game/ArenaMap';
 import { MatchConfig, MatchEndReport } from '../game/ArenaScene';
@@ -20,6 +20,7 @@ import {
   teamForSlot,
 } from '../net/NetworkClient';
 import { PwaManager } from '../pwa/PwaManager';
+import { enterFullscreen } from './FullscreenManager';
 import {
   BindableAction,
   CombatPace,
@@ -31,7 +32,7 @@ import {
   xpRequiredForLevel,
 } from '../storage/SaveManager';
 
-type ScreenName = 'title' | 'select' | 'rooms' | 'lobby' | 'loading' | 'none';
+type ScreenName = 'title' | 'select' | 'map-select' | 'rooms' | 'lobby' | 'loading' | 'none';
 
 export interface MenusCallbacks {
   onStartMatch: (config: MatchConfig) => Promise<void>;
@@ -67,6 +68,7 @@ export class Menus {
   private readonly net: NetworkClient;
   private readonly input: InputManager;
   private readonly callbacks: MenusCallbacks;
+  private readonly spriteLoader?: SpriteLoader;
 
   private currentScreen: ScreenName = 'title';
   private activeMatchMode: 'solo' | 'room-bot' | 'online' = 'solo';
@@ -75,6 +77,9 @@ export class Menus {
   private showPauseModal = false;
   private showAuthModal = false;
   private showFriendsModal = false;
+  private showPreMatchControls = false;
+  private preMatchConfirmLabel = 'Pronto! (Tela Cheia)';
+  private pendingPreMatchAction: (() => void) | null = null;
   private helpTab: 'keyboard' | 'gamepad' | 'touch' | 'combat' = 'keyboard';
   private capturingAction: {
     device: 'keyboard' | 'gamepad';
@@ -127,7 +132,8 @@ export class Menus {
     audio: AudioManager,
     net: NetworkClient,
     input: InputManager,
-    callbacks: MenusCallbacks
+    callbacks: MenusCallbacks,
+    spriteLoader?: SpriteLoader
   ) {
     const el = document.getElementById('ui-layer');
     if (!el) throw new Error('Elemento #ui-layer não encontrado.');
@@ -139,6 +145,7 @@ export class Menus {
     this.net = net;
     this.input = input;
     this.callbacks = callbacks;
+    this.spriteLoader = spriteLoader;
 
     const ids = Object.keys(manifest.characters);
     if (ids.length > 0) {
@@ -153,6 +160,50 @@ export class Menus {
     });
 
     this.bindNetworkEvents();
+    this.bindKeyboardShortcuts();
+  }
+
+  private bindKeyboardShortcuts(): void {
+    window.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (
+        this.showPreMatchControls &&
+        !this.showSettingsModal &&
+        (e.code === 'Enter' || e.code === 'Space')
+      ) {
+        e.preventDefault();
+        this.confirmPreMatchControls();
+        return;
+      }
+      if (e.code !== 'KeyC' && e.key.toLowerCase() !== 'c') return;
+      if (this.currentScreen !== 'select') return;
+      if (
+        this.showSettingsModal ||
+        this.showHelpModal ||
+        this.showPauseModal ||
+        this.showAuthModal ||
+        this.showFriendsModal ||
+        this.lastResult !== null ||
+        this.isTypingInInput()
+      ) {
+        return;
+      }
+      e.preventDefault();
+      this.cycleSelectedPhase();
+    });
+  }
+
+  private cycleSelectedPhase(): void {
+    const p1Prog = this.save.getCharacterProgress(this.selectedP1);
+    const maxUnlocked = Math.min(4, Math.max(1, p1Prog.unlockedPhase));
+    this.audio.unlock();
+    this.audio.playSfx('ui');
+    if (maxUnlocked <= 1) {
+      this.showToast('Suba de nível com este lutador para liberar novas formas!');
+      return;
+    }
+    this.selectedStartPhase = (this.selectedStartPhase % maxUnlocked) + 1;
+    this.render();
   }
 
   private bindNetworkEvents(): void {
@@ -288,6 +339,13 @@ export class Menus {
 
   public showSelect(): void {
     this.currentScreen = 'select';
+    this.showPauseModal = false;
+    this.lastResult = null;
+    this.render();
+  }
+
+  public showMapSelect(): void {
+    this.currentScreen = 'map-select';
     this.showPauseModal = false;
     this.lastResult = null;
     this.render();
@@ -455,6 +513,8 @@ export class Menus {
       html += this.renderTitleScreen();
     } else if (this.currentScreen === 'select') {
       html += this.renderSelectScreen();
+    } else if (this.currentScreen === 'map-select') {
+      html += this.renderMapSelectScreen();
     } else if (this.currentScreen === 'rooms') {
       html += this.renderRoomsScreen();
     } else if (this.currentScreen === 'lobby') {
@@ -485,6 +545,10 @@ export class Menus {
 
     if (this.showHelpModal) {
       html += this.renderHelpModal();
+    }
+
+    if (this.showPreMatchControls && !this.showSettingsModal) {
+      html += this.renderPreMatchControlsModal();
     }
 
     if (this.pendingInvites.length > 0 && this.currentScreen !== 'none') {
@@ -591,6 +655,17 @@ export class Menus {
             <button id="btn-go-rooms" class="ak-btn ak-btn-cyan" type="button">
               Salas (Amigo ou Bot)
             </button>
+            <button
+              id="btn-go-beatemup"
+              class="ak-btn ak-btn-ghost"
+              type="button"
+              disabled
+              aria-disabled="true"
+              title="Modo Beat 'em Up (Ruas do Brasil) em desenvolvimento"
+              style="opacity: 0.52; cursor: not-allowed;"
+            >
+              Beat 'em Up: Ruas do Brasil (Indisponível)
+            </button>
             <button id="btn-open-friends" class="ak-btn ak-btn-ghost" type="button">
               Amigos & Desafios ${pendingCount > 0 ? `<span class="ak-count-badge">${pendingCount}</span>` : ''}
             </button>
@@ -626,7 +701,9 @@ export class Menus {
   private renderSelectScreen(): string {
     const chars = Object.values(this.manifest.characters);
     const p1Char = this.manifest.characters[this.selectedP1];
+    const p2Char = this.manifest.characters[this.selectedP2];
     const p1Prog = this.save.getCharacterProgress(this.selectedP1);
+    const p2Prog = this.save.getCharacterProgress(this.selectedP2);
     const maxUnlocked = Math.min(4, Math.max(1, p1Prog.unlockedPhase));
     if (this.selectedStartPhase > maxUnlocked) {
       this.selectedStartPhase = 1;
@@ -634,14 +711,33 @@ export class Menus {
 
     const activePhaseData = p1Char?.phases[`fase_${this.selectedStartPhase}`];
     const moves = activePhaseData?.moves ?? {};
+    const p1SpriteSrc =
+      this.spriteLoader?.getMenuFullBodyUrl(this.selectedP1, this.selectedStartPhase) ??
+      activePhaseData?.actions.idle[0]?.src ??
+      p1Char?.phases.fase_1?.actions.idle[0]?.src ??
+      '';
+    const p1PhaseLabel = activePhaseData?.label ?? `Fase ${this.selectedStartPhase}`;
+
     const diff = this.save.getData().settings.difficulty;
+    const diffLabel = diff === 'easy' ? 'Fácil' : diff === 'master' ? 'Mestre' : 'Médio';
+    const p2PreviewPhase =
+      diff === 'master' ? Math.min(4, this.selectedStartPhase + 1) : this.selectedStartPhase;
+    const p2PhaseData =
+      p2Char?.phases[`fase_${p2PreviewPhase}`] ?? p2Char?.phases.fase_1;
+    const p2SpriteSrc =
+      this.spriteLoader?.getMenuFullBodyUrl(this.selectedP2, p2PreviewPhase) ??
+      p2PhaseData?.actions.idle[0]?.src ??
+      '';
 
     const cardsHtml = chars
       .map((c) => {
         const prog = this.save.getCharacterProgress(c.id);
         const needXp = xpRequiredForLevel(prog.level);
         const xpPct = Math.min(100, Math.round((prog.xp / needXp) * 100));
-        const thumbSrc = c.phases.fase_1?.actions.idle[0]?.src ?? '';
+        const thumbSrc =
+          this.spriteLoader?.getMenuPortraitUrl(c.id, 1) ??
+          c.phases.fase_1?.actions.idle[0]?.src ??
+          '';
         const isP1 = this.selectedP1 === c.id;
         const isP2 = this.selectedP2 === c.id;
         const cls =
@@ -654,7 +750,7 @@ export class Menus {
                 : '';
 
         const tagText =
-          isP1 && isP2 ? 'P1 + CPU' : isP1 ? 'VOCÊ (P1)' : isP2 ? 'CPU' : '';
+          isP1 && isP2 ? 'P1 + CPU' : isP1 ? 'P1' : isP2 ? 'CPU' : '';
 
         const pills = [1, 2, 3, 4]
           .map((ph) => {
@@ -664,108 +760,256 @@ export class Menus {
           .join('');
 
         return `
-          <button type="button" class="ak-char-card ${cls}" data-pick-char="${c.id}">
-            <div class="ak-char-top">
+          <button type="button" class="ak-char-card ak-arcade-tile ${cls}" data-pick-char="${c.id}">
+            ${tagText ? `<span class="ak-tile-badge ${isP1 && isP2 ? 'both' : isP1 ? 'p1' : 'cpu'}">${tagText}</span>` : ''}
+            <div class="ak-tile-portrait-wrap">
               <img class="ak-char-thumb" src="${thumbSrc}" alt="${escapeHtml(c.name)}" loading="lazy" />
-              <div class="ak-char-meta">
-                <h3>${escapeHtml(c.name)}</h3>
-                <div class="ak-char-level">Nível ${prog.level} · ${prog.wins}V / ${prog.matches}L</div>
-                ${
-                  tagText
-                    ? `<div style="font-size:0.72rem;font-weight:900;color:var(--ak-cyan);margin-top:2px;">${tagText}</div>`
-                    : ''
-                }
-              </div>
             </div>
-            <div class="ak-xp-bar"><div class="ak-xp-fill" style="width:${xpPct}%"></div></div>
-            <div class="ak-phase-pills">${pills}</div>
+            <div class="ak-tile-footer">
+              <h3>${escapeHtml(c.name)}</h3>
+              <div class="ak-char-level">Nv.${prog.level} · ${prog.wins}V</div>
+              <div class="ak-xp-bar"><div class="ak-xp-fill" style="width:${xpPct}%"></div></div>
+              <div class="ak-phase-pills">${pills}</div>
+            </div>
           </button>
         `;
       })
       .join('');
-
-    const phaseButtons = [1, 2, 3, 4]
-      .map((ph) => {
-        const unlocked = ph <= maxUnlocked;
-        const label = p1Char?.phases[`fase_${ph}`]?.label ?? `Fase ${ph}`;
-        return `
-          <button
-            type="button"
-            class="ak-seg-btn ${this.selectedStartPhase === ph ? 'active' : ''}"
-            data-pick-phase="${ph}"
-            ${unlocked ? '' : 'disabled style="opacity:0.4;cursor:not-allowed;"'}
-          >
-            F${ph}: ${escapeHtml(label)} ${unlocked ? '' : '🔒'}
-          </button>
-        `;
-      })
-      .join('');
-
-    const diffButtons: Array<{ id: AIDifficulty; label: string }> = [
-      { id: 'easy', label: 'Fácil' },
-      { id: 'medium', label: 'Médio' },
-      { id: 'master', label: 'Mestre' },
-    ];
 
     return `
-      <div class="ak-screen">
-        <div class="ak-panel">
+      <div class="ak-screen ak-arcade-screen">
+        <div class="ak-panel ak-arcade-shell">
           <div class="ak-select-header">
             <button id="btn-back-title" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-              Voltar
+              ← Voltar
             </button>
-            <h2>Seleção de Lutador (Solo)</h2>
+            <div class="ak-arcade-banner">ESCOLHA SEU LUTADOR</div>
             <button id="btn-open-settings" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
               Ajustes
             </button>
           </div>
 
-          <div class="ak-seg-group" style="margin:10px 0;">
-            <button type="button" class="ak-seg-btn ${this.selectingSlot === 'p1' ? 'active' : ''}" data-slot="p1">
-              Escolher Seu Lutador (P1)
-            </button>
-            <button type="button" class="ak-seg-btn ${this.selectingSlot === 'p2' ? 'active' : ''}" data-slot="p2">
-              Escolher Oponente (CPU)
-            </button>
-          </div>
-
-          <div class="ak-roster-grid">${cardsHtml}</div>
-        </div>
-
-        <div class="ak-panel">
-          <div class="ak-select-controls">
-            <div class="ak-field">
-              <label>Fase Inicial (${escapeHtml(p1Char?.name ?? '')})</label>
-              <div class="ak-seg-group">${phaseButtons}</div>
+          <div class="ak-arcade-select">
+            <!-- Pedestal P1 (Esquerda) -->
+            <div class="ak-pedestal-col ak-pedestal-p1">
+              <div class="ak-pedestal-role">VOCÊ (P1) · Nv.${p1Prog.level}</div>
+              <div class="ak-pedestal-stage">
+                <div class="ak-pedestal-aura p1"></div>
+                ${
+                  p1SpriteSrc
+                    ? `<img class="ak-pedestal-sprite" src="${p1SpriteSrc}" alt="${escapeHtml(p1Char?.name ?? 'P1')}" />`
+                    : ''
+                }
+                <div class="ak-pedestal-base p1"></div>
+              </div>
+              <div class="ak-pedestal-name">${escapeHtml(p1Char?.name ?? this.selectedP1)}</div>
+              <div class="ak-pedestal-form">
+                <span>F${this.selectedStartPhase}: ${escapeHtml(p1PhaseLabel)}</span>
+                <span class="ak-phase-counter">(${this.selectedStartPhase}/${maxUnlocked})</span>
+              </div>
+              <button
+                id="btn-cycle-phase"
+                type="button"
+                class="ak-btn ak-btn-sm ${maxUnlocked > 1 ? 'ak-btn-cyan' : 'ak-btn-ghost'}"
+                title="Pressione a tecla C para alternar entre formas liberadas"
+              >
+                <kbd class="ak-kbd">C</kbd> Mudar Forma
+              </button>
+              <div class="ak-pedestal-moves">
+                <div><span style="color:#38bdf8;">A1</span> ${escapeHtml(moves.ataque_1 ?? '-')}</div>
+                <div><span style="color:#fb923c;">A2</span> ${escapeHtml(moves.ataque_2 ?? '-')}</div>
+                <div><span style="color:#a855f7;">A3</span> ${escapeHtml(moves.ataque_3 ?? '-')}</div>
+                <div><span style="color:#facc15;">ULT</span> ${escapeHtml(moves.ataque_4 ?? '-')}</div>
+              </div>
             </div>
-            <div class="ak-field">
-              <label>Dificuldade da CPU</label>
-              <div class="ak-seg-group">
-                ${diffButtons
-                  .map(
-                    (d) => `
-                  <button type="button" class="ak-seg-btn ${diff === d.id ? 'active' : ''}" data-diff="${d.id}">
-                    ${d.label}
-                  </button>`
-                  )
-                  .join('')}
+
+            <!-- Grade Central -->
+            <div class="ak-arcade-center">
+              <div class="ak-seg-group ak-slot-switch">
+                <button type="button" class="ak-seg-btn ak-seg-sm ${this.selectingSlot === 'p1' ? 'active' : ''}" data-slot="p1">
+                  Selecionando: Você (P1)
+                </button>
+                <button type="button" class="ak-seg-btn ak-seg-sm ${this.selectingSlot === 'p2' ? 'active' : ''}" data-slot="p2">
+                  Selecionando: Oponente (CPU)
+                </button>
+              </div>
+
+              <div class="ak-roster-grid">${cardsHtml}</div>
+
+              <div class="ak-arcade-center-footer">
+                <div class="ak-hint-line">
+                  Pressione <kbd class="ak-kbd">C</kbd> para alternar formas liberadas antes de avançar.
+                </div>
+                <button id="btn-go-map-select" class="ak-btn ak-btn-primary" type="button" style="min-width:220px;">
+                  Avançar: Escolher Mapa →
+                </button>
+              </div>
+            </div>
+
+            <!-- Pedestal CPU (Direita) -->
+            <div class="ak-pedestal-col ak-pedestal-cpu">
+              <div class="ak-pedestal-role">OPONENTE (CPU) · Nv.${p2Prog.level}</div>
+              <div class="ak-pedestal-stage">
+                <div class="ak-pedestal-aura cpu"></div>
+                ${
+                  p2SpriteSrc
+                    ? `<img class="ak-pedestal-sprite mirrored" src="${p2SpriteSrc}" alt="${escapeHtml(p2Char?.name ?? 'CPU')}" />`
+                    : ''
+                }
+                <div class="ak-pedestal-base cpu"></div>
+              </div>
+              <div class="ak-pedestal-name">${escapeHtml(p2Char?.name ?? this.selectedP2)}</div>
+              <div class="ak-pedestal-form">
+                <span>F${p2PreviewPhase}: ${escapeHtml(p2PhaseData?.label ?? `Fase ${p2PreviewPhase}`)}</span>
+              </div>
+              <div class="ak-pedestal-diff-badge">
+                CPU: <strong>${diffLabel}</strong>
               </div>
             </div>
           </div>
+        </div>
+      </div>
+    `;
+  }
 
-          <div class="ak-field" style="margin-top:10px;">
-            <label>Cenário / Plano de Fundo</label>
-            ${this.renderThemePillsHtml('data-pick-theme', this.selectedMapTheme)}
+  private renderMapSelectScreen(): string {
+    const p1Char = this.manifest.characters[this.selectedP1];
+    const p2Char = this.manifest.characters[this.selectedP2];
+    const p1PhaseData =
+      p1Char?.phases[`fase_${this.selectedStartPhase}`] ?? p1Char?.phases.fase_1;
+    const diff = this.save.getData().settings.difficulty;
+    const diffLabel = diff === 'easy' ? 'Fácil' : diff === 'master' ? 'Mestre' : 'Médio';
+    const p2Phase =
+      diff === 'master' ? Math.min(4, this.selectedStartPhase + 1) : this.selectedStartPhase;
+    const p2PhaseData = p2Char?.phases[`fase_${p2Phase}`] ?? p2Char?.phases.fase_1;
+
+    const p1SpriteSrc =
+      this.spriteLoader?.getMenuFullBodyUrl(this.selectedP1, this.selectedStartPhase) ??
+      p1PhaseData?.actions.idle[0]?.src ??
+      '';
+    const p2SpriteSrc =
+      this.spriteLoader?.getMenuFullBodyUrl(this.selectedP2, p2Phase) ??
+      p2PhaseData?.actions.idle[0]?.src ??
+      '';
+
+    const activeTheme =
+      this.selectedMapTheme === 'random'
+        ? null
+        : getArenaThemeInfo(this.selectedMapTheme);
+
+    const mapCardsHtml = `
+      <button
+        type="button"
+        class="ak-map-card ${this.selectedMapTheme === 'random' ? 'active' : ''}"
+        data-pick-theme="random"
+      >
+        <div class="ak-map-thumb ak-map-thumb-random">
+          <span class="ak-map-random-icon">🎲</span>
+        </div>
+        <div class="ak-map-card-meta">
+          <strong>Aleatório</strong>
+          <span>Sorteia qualquer arena</span>
+        </div>
+      </button>
+      ${ARENA_THEMES.map(
+        (t) => `
+        <button
+          type="button"
+          class="ak-map-card ${this.selectedMapTheme === t.id ? 'active' : ''}"
+          data-pick-theme="${t.id}"
+          style="--map-accent:${t.accentColor};"
+        >
+          <div class="ak-map-thumb">
+            ${
+              t.imageSrc
+                ? `<img src="${t.imageSrc}" alt="${escapeHtml(t.name)}" loading="lazy" />`
+                : ''
+            }
+          </div>
+          <div class="ak-map-card-meta">
+            <strong>${escapeHtml(t.name)}</strong>
+            <span>${escapeHtml(t.subtitle)}</span>
+          </div>
+        </button>`
+      ).join('')}
+    `;
+
+    return `
+      <div class="ak-screen ak-arcade-screen">
+        <div class="ak-panel ak-arcade-shell">
+          <div class="ak-select-header">
+            <button id="btn-back-select" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+              ← Lutadores
+            </button>
+            <div class="ak-arcade-banner">ESCOLHA A ARENA</div>
+            <button id="btn-open-settings" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+              Ajustes
+            </button>
           </div>
 
-          <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:space-between;">
-            <div style="font-size:0.78rem;color:var(--ak-muted);">
-              <strong>Golpes F${this.selectedStartPhase}:</strong>
-              A1 ${escapeHtml(moves.ataque_1 ?? '-')} · A2 ${escapeHtml(moves.ataque_2 ?? '-')} · A3 ${escapeHtml(moves.ataque_3 ?? '-')} · ULT ${escapeHtml(moves.ataque_4 ?? '-')}
+          <div class="ak-arcade-select ak-arcade-map-layout">
+            <!-- Resumo P1 (Esquerda) -->
+            <div class="ak-pedestal-col ak-pedestal-p1">
+              <div class="ak-pedestal-role">VOCÊ (P1)</div>
+              <div class="ak-pedestal-stage ak-pedestal-compact">
+                <div class="ak-pedestal-aura p1"></div>
+                ${
+                  p1SpriteSrc
+                    ? `<img class="ak-pedestal-sprite" src="${p1SpriteSrc}" alt="${escapeHtml(p1Char?.name ?? 'P1')}" />`
+                    : ''
+                }
+                <div class="ak-pedestal-base p1"></div>
+              </div>
+              <div class="ak-pedestal-name">${escapeHtml(p1Char?.name ?? this.selectedP1)}</div>
+              <div class="ak-pedestal-form">F${this.selectedStartPhase}: ${escapeHtml(p1PhaseData?.label ?? '')}</div>
             </div>
-            <button id="btn-start-fight" class="ak-btn ak-btn-primary" type="button" style="min-width:190px;">
-              Iniciar Luta!
-            </button>
+
+            <!-- Centro: Preview + Grade de Mapas -->
+            <div class="ak-arcade-center">
+              <div class="ak-map-preview">
+                ${
+                  activeTheme?.imageSrc
+                    ? `<img class="ak-map-preview-img" src="${activeTheme.imageSrc}" alt="${escapeHtml(activeTheme.name)}" />`
+                    : `<div class="ak-map-preview-random">🎲 Arena Aleatória</div>`
+                }
+                <div class="ak-map-preview-overlay">
+                  <div class="ak-map-preview-title">
+                    ${activeTheme ? escapeHtml(activeTheme.name) : 'Arena Aleatória'}
+                  </div>
+                  <div class="ak-map-preview-sub">
+                    ${
+                      activeTheme
+                        ? escapeHtml(activeTheme.subtitle)
+                        : 'Um cenário aleatório será sorteado ao iniciar a luta'
+                    }
+                  </div>
+                </div>
+              </div>
+
+              <div class="ak-map-grid">${mapCardsHtml}</div>
+
+              <div class="ak-arcade-center-footer">
+                <button id="btn-start-fight" class="ak-btn ak-btn-primary" type="button" style="min-width:220px;">
+                  Iniciar Luta!
+                </button>
+              </div>
+            </div>
+
+            <!-- Resumo CPU (Direita) -->
+            <div class="ak-pedestal-col ak-pedestal-cpu">
+              <div class="ak-pedestal-role">CPU (${diffLabel})</div>
+              <div class="ak-pedestal-stage ak-pedestal-compact">
+                <div class="ak-pedestal-aura cpu"></div>
+                ${
+                  p2SpriteSrc
+                    ? `<img class="ak-pedestal-sprite mirrored" src="${p2SpriteSrc}" alt="${escapeHtml(p2Char?.name ?? 'CPU')}" />`
+                    : ''
+                }
+                <div class="ak-pedestal-base cpu"></div>
+              </div>
+              <div class="ak-pedestal-name">${escapeHtml(p2Char?.name ?? this.selectedP2)}</div>
+              <div class="ak-pedestal-form">F${p2Phase}: ${escapeHtml(p2PhaseData?.label ?? '')}</div>
+            </div>
           </div>
         </div>
       </div>
@@ -1779,6 +2023,92 @@ export class Menus {
     `;
   }
 
+  public openPreMatchControls(
+    action: () => void,
+    confirmLabel = 'Pronto! (Tela Cheia)'
+  ): void {
+    this.pendingPreMatchAction = action;
+    this.preMatchConfirmLabel = confirmLabel;
+    this.showPreMatchControls = true;
+    this.render();
+  }
+
+  private confirmPreMatchControls(): void {
+    const action = this.pendingPreMatchAction;
+    this.showPreMatchControls = false;
+    this.pendingPreMatchAction = null;
+    void enterFullscreen();
+    this.render();
+    action?.();
+  }
+
+  private renderPreMatchControlsModal(): string {
+    const kb = this.save.getData().settings.keyBindings;
+    const gp = this.input.getConnectedGamepad();
+
+    const moveActions: BindableAction[] = ['left', 'right', 'up', 'down', 'jump', 'dash'];
+    const combatActions: BindableAction[] = ['a1', 'a2', 'a3', 'a4', 'block', 'evolve', 'pause'];
+
+    const renderKeyRow = (action: BindableAction) => {
+      const keys = kb[action] ?? [];
+      const keyBadges =
+        keys.length > 0
+          ? keys.map((code) => `<kbd class="ak-keycap">${escapeHtml(formatKeyCode(code))}</kbd>`).join(' ')
+          : `<span class="ak-subtitle">—</span>`;
+      return `
+        <div class="ak-prematch-row">
+          <span class="ak-prematch-action">${escapeHtml(BINDABLE_ACTION_LABELS[action])}</span>
+          <span class="ak-prematch-keys">${keyBadges}</span>
+        </div>
+      `;
+    };
+
+    return `
+      <div class="ak-modal-backdrop">
+        <div class="ak-modal ak-prematch-modal">
+          <div style="text-align:center;">
+            <span class="ak-badge">MODO TELA CHEIA</span>
+            <h2 style="margin:6px 0 4px;">Controles do Teclado</h2>
+            <p class="ak-subtitle" style="margin:0;font-size:0.84rem;">
+              Confira as teclas atribuídas antes de entrar. Ao clicar em <strong>Pronto</strong>, o jogo entra em tela cheia.
+            </p>
+          </div>
+          <div class="ak-prematch-grid">
+            <div class="ak-prematch-group">
+              <div class="ak-prematch-group-title">Movimentação</div>
+              ${moveActions.map(renderKeyRow).join('')}
+            </div>
+            <div class="ak-prematch-group">
+              <div class="ak-prematch-group-title">Combate & Ações</div>
+              ${combatActions.map(renderKeyRow).join('')}
+            </div>
+          </div>
+          ${
+            gp.connected
+              ? `<div class="ak-gamepad-pill connected" style="align-self:center;">
+                  🎮 Controle detectado: ${escapeHtml(gp.name.slice(0, 32))}
+                </div>`
+              : ''
+          }
+          <div class="ak-prematch-actions">
+            <button id="btn-prematch-ready" class="ak-btn ak-btn-primary" type="button">
+              ${escapeHtml(this.preMatchConfirmLabel)}
+            </button>
+            <button id="btn-prematch-edit-keys" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+              Alterar Teclas
+            </button>
+            <button id="btn-prematch-cancel" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+              Cancelar
+            </button>
+          </div>
+          <p class="ak-subtitle" style="margin:0;text-align:center;font-size:0.75rem;">
+            Atalho rápido: pressione <kbd class="ak-keycap">Enter</kbd> ou <kbd class="ak-keycap">Espaço</kbd> para confirmar.
+          </p>
+        </div>
+      </div>
+    `;
+  }
+
   private renderSettingsModal(): string {
     const s = this.save.getData().settings;
     return `
@@ -1792,6 +2122,24 @@ export class Menus {
               </button>
               <button id="btn-close-settings" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
                 Fechar
+              </button>
+            </div>
+          </div>
+
+          <div class="ak-setting-row">
+            <div>
+              <div>Dificuldade da CPU</div>
+              <div style="font-size:0.72rem;color:#94a3b8;">Ajusta reação, combos e evolução do bot</div>
+            </div>
+            <div class="ak-seg-group">
+              <button type="button" class="ak-seg-btn ak-seg-sm ${s.difficulty === 'easy' ? 'active' : ''}" data-diff="easy">
+                Fácil
+              </button>
+              <button type="button" class="ak-seg-btn ak-seg-sm ${s.difficulty === 'medium' ? 'active' : ''}" data-diff="medium">
+                Médio
+              </button>
+              <button type="button" class="ak-seg-btn ak-seg-sm ${s.difficulty === 'master' ? 'active' : ''}" data-diff="master">
+                Mestre
               </button>
             </div>
           </div>
@@ -2045,6 +2393,10 @@ export class Menus {
             <h4>Evolução de Fase (1 → 4)</h4>
             <p>Cause ou receba dano para carregar a barra roxa de Evolução. Quando atingir 100%, pressione <strong>Evoluir</strong> para transformar e ganhar dano, velocidade e novos golpes!</p>
           </div>
+          <div class="ak-help-card">
+            <h4>Dash, Short Hop &amp; Carregar Ki</h4>
+            <p>Use <strong>2× ←/→</strong> ou <strong>Dash (Q)</strong> para esquivar com invulnerabilidade inicial (inclusive cancelando A1/A2 no acerto!). Solte Pulo rápido para <strong>Short Hop</strong> e segure <strong>↓ + Defesa</strong> no solo para recarregar Ki.</p>
+          </div>
         </div>
       `;
     }
@@ -2113,6 +2465,9 @@ export class Menus {
 
     // Navegação principal
     click('btn-go-select', () => this.showSelect());
+    click('btn-go-map-select', () => this.showMapSelect());
+    click('btn-back-select', () => this.showSelect());
+    click('btn-cycle-phase', () => this.cycleSelectedPhase());
     click('btn-go-rooms', () => this.showRooms());
     click('btn-back-title', () => this.showTitle());
 
@@ -2198,6 +2553,20 @@ export class Menus {
     click('btn-start-fight', () => {
       this.activeMatchMode = 'solo';
       void this.callbacks.onStartMatch(this.getCurrentMatchConfig());
+    });
+
+    // Pré-partida Beat 'em Up: Menu de Controles + Tela Cheia
+    click('btn-prematch-ready', () => {
+      this.confirmPreMatchControls();
+    });
+    click('btn-prematch-edit-keys', () => {
+      this.showSettingsModal = true;
+      this.render();
+    });
+    click('btn-prematch-cancel', () => {
+      this.showPreMatchControls = false;
+      this.pendingPreMatchAction = null;
+      this.render();
     });
 
     // Pausa & Resultado

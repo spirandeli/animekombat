@@ -19,15 +19,21 @@ export function teamForSlot(slot: FighterSlotId): FighterTeam {
 export type FighterState =
   | 'idle'
   | 'run'
+  | 'dash'
   | 'jump'
+  | 'land'
   | 'crouch'
   | 'block'
+  | 'ki_charge'
   | 'hitstun'
+  | 'knockdown'
+  | 'getup'
   | 'ataque_1'
   | 'ataque_2'
   | 'ataque_3'
   | 'ataque_4'
-  | 'evolve';
+  | 'evolve'
+  | 'victory';
 
 export interface AttackSpec {
   action: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4';
@@ -59,8 +65,8 @@ export const ATTACK_SPECS: Record<
     action: 'ataque_1',
     vfx: 'vfx_ataque_1',
     duration: 0.5,
-    activeStart: 0.28,
-    activeEnd: 0.72,
+    activeStart: 0.25,
+    activeEnd: 0.58,
     damage: 58,
     kiCost: 0,
     kiGainOnHit: 10,
@@ -80,8 +86,8 @@ export const ATTACK_SPECS: Record<
     action: 'ataque_2',
     vfx: 'vfx_ataque_2',
     duration: 0.68,
-    activeStart: 0.3,
-    activeEnd: 0.75,
+    activeStart: 0.27,
+    activeEnd: 0.67,
     damage: 98,
     kiCost: 12,
     kiGainOnHit: 12,
@@ -101,7 +107,7 @@ export const ATTACK_SPECS: Record<
     action: 'ataque_3',
     vfx: 'vfx_ataque_3',
     duration: 0.74,
-    activeStart: 0.38,
+    activeStart: 0.35,
     activeEnd: 0.65,
     damage: 115,
     kiCost: 25,
@@ -122,8 +128,8 @@ export const ATTACK_SPECS: Record<
     action: 'ataque_4',
     vfx: 'vfx_ataque_4',
     duration: 1.08,
-    activeStart: 0.36,
-    activeEnd: 0.84,
+    activeStart: 0.35,
+    activeEnd: 0.75,
     damage: 245,
     kiCost: 65,
     kiGainOnHit: 0,
@@ -219,6 +225,10 @@ export class Fighter {
   public projectileSpawned = false;
   public vfxSpawned = false;
   public landingTimer = 0;
+  public dashCooldown = 0;
+  private dashDir: 1 | -1 = 1;
+  private knockdownBounceDone = false;
+  private knockdownGroundTimer = 0;
   public comboHitsReceived = 0;
   public comboResetTimer = 0;
   public auraFlashTime = 0;
@@ -243,7 +253,7 @@ export class Fighter {
   private afterimageTimer = 0;
   private hasMoveInputInAttack = false;
   private bufferedAction: {
-    type: 'jump' | 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4';
+    type: 'jump' | 'dash' | 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4';
     ttl: number;
   } | null = null;
 
@@ -328,6 +338,9 @@ export class Fighter {
     this.projectileSpawned = false;
     this.vfxSpawned = false;
     this.landingTimer = 0;
+    this.dashCooldown = 0;
+    this.knockdownBounceDone = false;
+    this.knockdownGroundTimer = 0;
     this.comboHitsReceived = 0;
     this.comboResetTimer = 0;
     this.auraFlashTime = 0;
@@ -419,8 +432,41 @@ export class Fighter {
       this.evoEnergy >= 100 &&
       !this.evolvingPending &&
       this.state !== 'hitstun' &&
+      this.state !== 'knockdown' &&
+      this.state !== 'getup' &&
       this.state !== 'evolve'
     );
+  }
+
+  public canChainCombo(): boolean {
+    if (this.state !== 'ataque_1' && this.state !== 'ataque_2') return false;
+    if (!this.attackHitDone) return false;
+    const spec = this.getAttackSpec(this.state);
+    return this.stateTime / spec.duration >= 0.42;
+  }
+
+  public enterVictory(): void {
+    if (this.hp <= 0 || this.state === 'victory') return;
+    this.state = 'victory';
+    this.stateTime = 0;
+    this.vx = 0;
+    this.bufferedAction = null;
+  }
+
+  public tryStartDash(input?: FighterInputState): boolean {
+    if (this.hp <= 0 || this.dashCooldown > 0) return false;
+    if (input && Math.abs(input.moveX) > 0.22) {
+      this.facing = input.moveX > 0 ? 1 : -1;
+    }
+    this.dashDir = this.facing;
+    this.dashCooldown = 0.45;
+    this.state = 'dash';
+    this.stateTime = 0;
+    this.bufferedAction = null;
+    this.invulnTime = Math.max(this.invulnTime, 0.11);
+    this.vx = this.dashDir * 560 * this.getPhaseSpeedMultiplier();
+    this.callbacks?.onJumpDust?.(this);
+    return true;
   }
 
   public addCombatXpAndEnergy(xpAmount: number, evoGain: number): void {
@@ -497,6 +543,7 @@ export class Fighter {
     this.cooldowns.ataque_3 = Math.max(0, this.cooldowns.ataque_3 - dt);
     this.cooldowns.ataque_4 = Math.max(0, this.cooldowns.ataque_4 - dt);
     this.invulnTime = Math.max(0, this.invulnTime - dt);
+    this.dashCooldown = Math.max(0, this.dashCooldown - dt);
     this.blockImpactTimer = Math.max(0, this.blockImpactTimer - dt);
     this.auraFlashTime = Math.max(0, this.auraFlashTime - dt);
     this.dropThroughTimer = Math.max(0, this.dropThroughTimer - dt);
@@ -513,9 +560,10 @@ export class Fighter {
     else if (input.justA3) this.bufferedAction = { type: 'ataque_3', ttl: 0.12 };
     else if (input.justA2) this.bufferedAction = { type: 'ataque_2', ttl: 0.12 };
     else if (input.justA1) this.bufferedAction = { type: 'ataque_1', ttl: 0.12 };
+    else if (input.justDash) this.bufferedAction = { type: 'dash', ttl: 0.12 };
     else if (input.justJump) this.bufferedAction = { type: 'jump', ttl: 0.12 };
 
-    // Atualiza afterimages (rastros sutis apenas em golpes especiais ou velocidade alta)
+    // Atualiza afterimages (rastros sutis apenas em golpes especiais, dash ou velocidade alta)
     for (let i = this.afterimages.length - 1; i >= 0; i--) {
       this.afterimages[i].age += dt;
       if (this.afterimages[i].age >= this.afterimages[i].maxAge) {
@@ -525,10 +573,13 @@ export class Fighter {
     const shouldEmitTrail =
       this.hp > 0 &&
       (Math.abs(this.vx) > 310 ||
+        this.state === 'dash' ||
         this.state === 'ataque_2' ||
         this.state === 'ataque_4' ||
         this.state === 'evolve' ||
-        (this.state === 'hitstun' && this.stateTime < 0.14 && Math.abs(this.vx) > 260));
+        ((this.state === 'hitstun' || this.state === 'knockdown') &&
+          this.stateTime < 0.14 &&
+          Math.abs(this.vx) > 260));
     if (shouldEmitTrail) {
       this.afterimageTimer -= dt;
       if (this.afterimageTimer <= 0) {
@@ -561,12 +612,19 @@ export class Fighter {
 
     if (this.hp <= 0) {
       this.vx *= Math.pow(0.05, dt);
-      if (this.state !== 'hitstun') {
-        this.state = 'hitstun';
+      if (this.state !== 'knockdown') {
+        this.state = 'knockdown';
+        this.stateTime = 0;
       }
     } else {
       // Máquina de estados (facing 100% manual: sem virada magnética passiva)
       switch (this.state) {
+        case 'victory': {
+          this.vx *= Math.pow(0.02, dt);
+          if (Math.abs(this.vx) < 8) this.vx = 0;
+          break;
+        }
+
         case 'evolve': {
           this.vx *= Math.pow(0.02, dt);
           if (Math.abs(this.vx) < 8) this.vx = 0;
@@ -577,10 +635,96 @@ export class Fighter {
           break;
         }
 
+        case 'dash': {
+          const dashSpeed = 560 * this.getPhaseSpeedMultiplier();
+          this.vx = this.dashDir * dashSpeed * (this.stateTime > 0.14 ? 0.55 : 1);
+          if (this.stateTime >= 0.1) {
+            if (input.justA4 && this.tryStartAttack('ataque_4', input)) break;
+            if (input.justA3 && this.tryStartAttack('ataque_3', input)) break;
+            if (input.justA2 && this.tryStartAttack('ataque_2', input)) break;
+            if (input.justA1 && this.tryStartAttack('ataque_1', input)) break;
+          }
+          if (this.stateTime >= 0.2) {
+            this.state = this.grounded
+              ? Math.abs(input.moveX) > 0.25
+                ? 'run'
+                : 'idle'
+              : 'jump';
+            this.stateTime = 0;
+          }
+          break;
+        }
+
+        case 'land': {
+          this.vx *= Math.pow(0.02, dt);
+          if (input.justA4 && this.tryStartAttack('ataque_4', input)) break;
+          if (input.justA3 && this.tryStartAttack('ataque_3', input)) break;
+          if (input.justA2 && this.tryStartAttack('ataque_2', input)) break;
+          if (input.justA1 && this.tryStartAttack('ataque_1', input)) break;
+          if (input.justDash && this.tryStartDash(input)) break;
+          if (input.justJump) {
+            this.updateNeutralState(dt, input);
+            break;
+          }
+          if (this.landingTimer <= 0 || this.stateTime >= 0.09) {
+            this.state = Math.abs(input.moveX) > 0.25 ? 'run' : 'idle';
+            this.stateTime = 0;
+          }
+          break;
+        }
+
+        case 'ki_charge': {
+          this.vx = 0;
+          this.ki = Math.min(this.maxKi, this.ki + dt * 22);
+          this.auraFlashTime = Math.max(this.auraFlashTime, 0.08);
+          if (input.justA4 && this.tryStartAttack('ataque_4', input)) break;
+          if (input.justA3 && this.tryStartAttack('ataque_3', input)) break;
+          if (input.justA2 && this.tryStartAttack('ataque_2', input)) break;
+          if (input.justA1 && this.tryStartAttack('ataque_1', input)) break;
+          if (input.justDash && this.tryStartDash(input)) break;
+          if (!this.grounded || !input.down || !input.block) {
+            this.state = this.grounded ? 'idle' : 'jump';
+            this.stateTime = 0;
+          }
+          break;
+        }
+
         case 'hitstun': {
           this.hitstunRemaining -= dt;
           this.vx *= Math.pow(0.08, dt);
           if (this.hitstunRemaining <= 0) {
+            this.state = this.grounded ? 'idle' : 'jump';
+            this.stateTime = 0;
+          }
+          break;
+        }
+
+        case 'knockdown': {
+          if (this.grounded) {
+            if (!this.knockdownBounceDone) {
+              this.knockdownBounceDone = true;
+              this.vy = -135;
+              this.grounded = false;
+              this.vx *= 0.45;
+              this.callbacks?.onLand?.(this);
+            } else {
+              this.vx *= Math.pow(0.04, dt);
+              this.knockdownGroundTimer += dt;
+              if (this.knockdownGroundTimer >= 0.28) {
+                this.state = 'getup';
+                this.stateTime = 0;
+                this.invulnTime = Math.max(this.invulnTime, 0.28);
+              }
+            }
+          } else {
+            this.vx *= Math.pow(0.35, dt);
+          }
+          break;
+        }
+
+        case 'getup': {
+          this.vx = 0;
+          if (this.stateTime >= 0.22) {
             this.state = this.grounded ? 'idle' : 'jump';
             this.stateTime = 0;
           }
@@ -602,6 +746,7 @@ export class Fighter {
             !input.justA3 &&
             !input.justA2 &&
             !input.justA1 &&
+            !input.justDash &&
             !input.justJump
               ? {
                   ...input,
@@ -609,6 +754,7 @@ export class Fighter {
                   justA3: this.bufferedAction.type === 'ataque_3',
                   justA2: this.bufferedAction.type === 'ataque_2',
                   justA1: this.bufferedAction.type === 'ataque_1',
+                  justDash: this.bufferedAction.type === 'dash',
                   justJump: this.bufferedAction.type === 'jump',
                 }
               : input;
@@ -672,7 +818,7 @@ export class Fighter {
         this.landingTimer = 0.09;
         if (heavyLand) this.callbacks?.onLand?.(this);
         if (this.state === 'jump') {
-          this.state = 'idle';
+          this.state = heavyLand ? 'land' : 'idle';
           this.stateTime = 0;
         }
       }
@@ -689,7 +835,7 @@ export class Fighter {
         this.landingTimer = 0.09;
         if (heavyLand) this.callbacks?.onLand?.(this);
         if (this.state === 'jump') {
-          this.state = 'idle';
+          this.state = heavyLand ? 'land' : 'idle';
           this.stateTime = 0;
         }
       } else if (this.currentPlatformId === null) {
@@ -711,11 +857,12 @@ export class Fighter {
       return;
     }
 
-    // Prioridade de ataques (do Ultimate ao básico)
+    // Prioridade de ataques (do Ultimate ao básico) e Dash
     if (input.justA4 && this.tryStartAttack('ataque_4', input)) return;
     if (input.justA3 && this.tryStartAttack('ataque_3', input)) return;
     if (input.justA2 && this.tryStartAttack('ataque_2', input)) return;
     if (input.justA1 && this.tryStartAttack('ataque_1', input)) return;
+    if (input.justDash && this.tryStartDash(input)) return;
 
     // Atravessar plataforma para baixo (Baixo + Pulo)
     if (
@@ -730,6 +877,14 @@ export class Fighter {
       this.vy = 115;
       this.state = 'jump';
       this.stateTime = 0;
+      return;
+    }
+
+    // Carregar Ki (Baixo + Defesa no solo)
+    if (this.grounded && input.down && input.block) {
+      this.state = 'ki_charge';
+      this.stateTime = 0;
+      this.vx = 0;
       return;
     }
 
@@ -770,9 +925,12 @@ export class Fighter {
       return;
     }
 
-    // Movimento horizontal / Corrida / Controle aéreo com fast-fall
+    // Movimento horizontal / Corrida / Controle aéreo com short-hop e fast-fall
     if (!this.grounded) {
       this.state = 'jump';
+      if (!input.jump && this.vy < -220) {
+        this.vy *= Math.pow(0.06, dt);
+      }
       if (input.down && this.vy > 0) {
         this.vy += Fighter.GRAVITY * 0.45 * dt;
       }
@@ -856,6 +1014,9 @@ export class Fighter {
       if (input.justA4 && this.tryStartAttack('ataque_4', input)) return;
       if (input.justA3 && this.tryStartAttack('ataque_3', input)) return;
       if (this.state === 'ataque_1' && input.justA2 && this.tryStartAttack('ataque_2', input)) {
+        return;
+      }
+      if (input.justDash && this.tryStartDash(input)) {
         return;
       }
       if (this.grounded && input.justJump) {
@@ -1054,7 +1215,13 @@ export class Fighter {
 
     const finalDamage = Math.round(rawDamage);
     this.hp = Math.max(0, this.hp - finalDamage);
-    this.state = 'hitstun';
+    this.comboHitsReceived++;
+    this.comboResetTimer = 1.25;
+    this.knockdownBounceDone = false;
+    this.knockdownGroundTimer = 0;
+    const isHeavyKnockdown =
+      this.hp <= 0 || knockbackY <= -180 || this.comboHitsReceived >= 3;
+    this.state = isHeavyKnockdown ? 'knockdown' : 'hitstun';
     this.stateTime = 0;
     this.hitstunRemaining = hitstun;
     this.vx = pushDir * knockbackX;
@@ -1064,8 +1231,6 @@ export class Fighter {
     } else if (knockbackY > 30 && !this.grounded) {
       this.vy = Math.max(this.vy, knockbackY);
     }
-    this.comboHitsReceived++;
-    this.comboResetTimer = 1.25;
     this.addCombatXpAndEnergy(6, 14);
     return { blocked: false, finalDamage };
   }
@@ -1211,7 +1376,21 @@ export class Fighter {
 
   private resolveCurrentAction(): CanonicalAction {
     if (this.state === 'evolve') {
-      return 'ataque_4';
+      return this.getActionFrames('evolve') ? 'evolve' : 'ataque_4';
+    }
+    if (this.state === 'ki_charge') {
+      return this.getActionFrames('ki_charge')
+        ? 'ki_charge'
+        : this.getActionFrames('block')
+          ? 'block'
+          : 'idle';
+    }
+    if (this.state === 'getup') {
+      return this.getActionFrames('getup')
+        ? 'getup'
+        : this.getActionFrames('land')
+          ? 'land'
+          : 'crouch';
     }
     if (
       this.state === 'ataque_1' ||
@@ -1331,7 +1510,10 @@ export class Fighter {
       (action === 'land' ||
         action === 'dash' ||
         action === 'knockdown' ||
-        action === 'victory')
+        action === 'victory' ||
+        action === 'getup' ||
+        action === 'evolve' ||
+        action === 'ki_charge')
     ) {
       const f1 = this.spriteLoader.getCachedPhase(this.charId, 1)?.actions.get(action);
       if (f1 && f1.length > 0) return f1;
@@ -1354,7 +1536,7 @@ export class Fighter {
       }
     }
 
-    let frames =
+    const frames =
       this.getActionFrames(action) ?? this.getActionFrames('idle');
     if (!frames || frames.length === 0) return undefined;
 
@@ -1363,15 +1545,14 @@ export class Fighter {
       const fps = frames.length >= 6 ? 8 : 6.5;
       idx = Math.floor(this.stateTime * fps) % frames.length;
     } else if (this.state === 'run') {
-      const dashFrames =
-        this.stateTime < 0.16 || Math.abs(this.vx) > 295
-          ? this.getActionFrames('dash')
-          : undefined;
-      if (dashFrames && dashFrames.length > 0) {
-        frames = dashFrames;
-      }
       const fps = frames.length >= 8 ? 15 : frames.length >= 6 ? 13 : 11;
       idx = Math.floor(this.stateTime * fps) % frames.length;
+    } else if (this.state === 'dash') {
+      const p = Math.min(0.999, Math.max(0, this.stateTime / 0.2));
+      idx = Math.floor(p * frames.length);
+    } else if (this.state === 'land') {
+      const p = Math.min(0.999, Math.max(0, this.stateTime / 0.09));
+      idx = Math.floor(p * frames.length);
     } else if (this.state === 'jump') {
       if (this.grounded && this.landingTimer > 0) {
         idx = frames.length - 1;
@@ -1394,19 +1575,29 @@ export class Fighter {
         const guardIdx = frames.length >= 6 ? 2 : 1;
         idx = this.stateTime < 0.07 ? 0 : Math.min(guardIdx, frames.length - 1);
       }
+    } else if (this.state === 'ki_charge') {
+      const fps = 10;
+      idx = Math.floor(this.stateTime * fps) % frames.length;
     } else if (this.state === 'hitstun') {
-      if (this.hp <= 0 || this.comboHitsReceived >= 3 || Math.abs(this.vx) > 320) {
-        const kdFrames = this.getActionFrames('knockdown');
-        if (kdFrames && kdFrames.length > 0) {
-          frames = kdFrames;
-        }
-      }
       const totalStun = Math.max(
         0.18,
         this.stateTime + Math.max(0, this.hitstunRemaining)
       );
       const p = Math.min(0.999, this.stateTime / totalStun);
       idx = Math.min(frames.length - 1, Math.floor(p * frames.length));
+    } else if (this.state === 'knockdown') {
+      if (this.grounded && this.knockdownBounceDone) {
+        idx = frames.length - 1;
+      } else {
+        const p = Math.min(0.999, Math.max(0, this.stateTime / 0.42));
+        idx = Math.floor(p * frames.length);
+      }
+    } else if (this.state === 'getup') {
+      const p = Math.min(0.999, Math.max(0, this.stateTime / 0.22));
+      idx = Math.floor(p * frames.length);
+    } else if (this.state === 'victory') {
+      const p = Math.min(0.999, Math.max(0, this.stateTime / 0.65));
+      idx = Math.floor(p * frames.length);
     } else if (this.state === 'evolve') {
       const fps = frames.length >= 6 ? 12 : 10;
       idx = Math.floor(this.stateTime * fps) % frames.length;

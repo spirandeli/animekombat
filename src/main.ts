@@ -22,6 +22,7 @@ async function bootstrap(): Promise<void> {
   const net = new NetworkClient(save);
   const spriteLoader = new SpriteLoader();
   const manifest = await spriteLoader.loadManifest();
+  await spriteLoader.loadMenuManifest();
 
   const pwa = new PwaManager();
   const audio = new AudioManager();
@@ -188,7 +189,7 @@ async function bootstrap(): Promise<void> {
       syncPauseState();
     },
     onSettingsChanged: applySettings,
-  });
+  }, spriteLoader);
 
   net.on('matchStart', (config) => {
     void startMatchFlow(config);

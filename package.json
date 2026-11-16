@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host",
     "start": "node server/prod.mjs",
-    "process-sprites": "node scripts/process_sprites_2x2.mjs"
+    "process-sprites": "node scripts/process_sprites_2x2.mjs",
+    "process-menu-sprites": "python3 scripts/process_menu_sprites.py"
   },
   "devDependencies": {
     "@types/ws": "^8.18.2",
