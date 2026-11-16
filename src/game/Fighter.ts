@@ -18,6 +18,7 @@ export function teamForSlot(slot: FighterSlotId): FighterTeam {
 
 export type FighterState =
   | 'idle'
+  | 'walk'
   | 'run'
   | 'dash'
   | 'jump'
@@ -227,6 +228,7 @@ export class Fighter {
   public landingTimer = 0;
   public dashCooldown = 0;
   private dashDir: 1 | -1 = 1;
+  private isSprinting = false;
   private knockdownBounceDone = false;
   private knockdownGroundTimer = 0;
   public comboHitsReceived = 0;
@@ -265,6 +267,7 @@ export class Fighter {
   private static readonly GRAVITY = 1580;
   private static readonly JUMP_VEL = -665;
   private static readonly BASE_SPEED = 255;
+  private static readonly SPRINT_SPEED = 415;
   private static readonly actionMedianHeightCache = new WeakMap<
     LoadedPhasePack,
     Map<CanonicalAction, number>
@@ -364,6 +367,25 @@ export class Fighter {
 
   public getPhaseSpeedMultiplier(): number {
     return 1 + (this.phase - 1) * 0.08;
+  }
+
+  private hasWalkAnimation(): boolean {
+    return (this.getActionFrames('walk')?.length ?? 0) > 0;
+  }
+
+  /** Selects 'walk' for default travel, 'run' when sprinting or when no walk cycle exists, and 'idle' against walls. */
+  private resolveGroundedMoveState(moveX: number): FighterState {
+    if (Math.abs(moveX) <= 0.25) return 'idle';
+    const moveDir: 1 | -1 = moveX > 0 ? 1 : -1;
+    const blockedByLeftWall = this.x <= this.arenaLeft + 1 && moveDir < 0;
+    const blockedByRightWall = this.x >= this.arenaRight - 1 && moveDir > 0;
+    if (blockedByLeftWall || blockedByRightWall) {
+      return 'idle';
+    }
+    if (this.isSprinting || !this.hasWalkAnimation()) {
+      return 'run';
+    }
+    return 'walk';
   }
 
   private getScaledAttackDuration(
@@ -484,6 +506,7 @@ export class Fighter {
 
   public enterVictory(): void {
     if (this.hp <= 0 || this.state === 'victory') return;
+    this.isSprinting = false;
     this.state = 'victory';
     this.stateTime = 0;
     this.vx = 0;
@@ -497,6 +520,7 @@ export class Fighter {
     }
     this.dashDir = this.facing;
     this.dashCooldown = 0.45;
+    this.isSprinting = false;
     this.state = 'dash';
     this.stateTime = 0;
     this.bufferedAction = null;
@@ -517,6 +541,7 @@ export class Fighter {
     if (this.phase >= 4 || this.evolvingPending) return;
     const nextPhase = this.phase + 1;
     this.evolvingPending = true;
+    this.isSprinting = false;
     this.evoEnergy = 0;
     this.state = 'evolve';
     this.stateTime = 0;
@@ -687,10 +712,12 @@ export class Fighter {
             if (input.justA1 && this.tryStartAttack('ataque_1', input)) break;
           }
           if (this.stateTime >= dashDuration) {
+            const continuingDashDir =
+              Math.abs(input.moveX) > 0.25 &&
+              (input.moveX > 0 ? 1 : -1) === this.dashDir;
+            this.isSprinting = this.grounded && continuingDashDir;
             this.state = this.grounded
-              ? Math.abs(input.moveX) > 0.25
-                ? 'run'
-                : 'idle'
+              ? this.resolveGroundedMoveState(input.moveX)
               : 'jump';
             this.stateTime = 0;
           }
@@ -709,7 +736,8 @@ export class Fighter {
             break;
           }
           if (this.landingTimer <= 0 || this.stateTime >= this.getLandDuration()) {
-            this.state = Math.abs(input.moveX) > 0.25 ? 'run' : 'idle';
+            this.isSprinting = false;
+            this.state = this.resolveGroundedMoveState(input.moveX);
             this.stateTime = 0;
           }
           break;
@@ -915,6 +943,7 @@ export class Fighter {
       input.down &&
       input.justJump
     ) {
+      this.isSprinting = false;
       this.dropThroughTimer = 0.24;
       this.grounded = false;
       this.currentPlatformId = null;
@@ -926,6 +955,7 @@ export class Fighter {
 
     // Carregar Ki (Baixo + Defesa no solo)
     if (this.grounded && input.down && input.block) {
+      this.isSprinting = false;
       this.state = 'ki_charge';
       this.stateTime = 0;
       this.vx = 0;
@@ -934,6 +964,7 @@ export class Fighter {
 
     // Defesa (apenas no chão/plataforma; permite trocar direção manualmente)
     if (this.grounded && input.block) {
+      this.isSprinting = false;
       if (Math.abs(input.moveX) > 0.25) {
         this.facing = input.moveX > 0 ? 1 : -1;
       }
@@ -944,6 +975,7 @@ export class Fighter {
 
     // Pulo
     if (this.grounded && input.justJump) {
+      this.isSprinting = false;
       this.bufferedAction = null;
       this.callbacks?.onJumpDust?.(this);
       this.grounded = false;
@@ -961,6 +993,7 @@ export class Fighter {
 
     // Agachar (facing 100% manual)
     if (this.grounded && input.down) {
+      this.isSprinting = false;
       if (Math.abs(input.moveX) > 0.25) {
         this.facing = input.moveX > 0 ? 1 : -1;
       }
@@ -969,8 +1002,9 @@ export class Fighter {
       return;
     }
 
-    // Movimento horizontal / Corrida / Controle aéreo com short-hop e fast-fall
+    // Movimento horizontal / Caminhada padrão vs Corrida (Sprint após Dash) / Controle aéreo
     if (!this.grounded) {
+      this.isSprinting = false;
       this.state = 'jump';
       if (!input.jump && this.vy < -220) {
         this.vy *= Math.pow(0.06, dt);
@@ -990,22 +1024,31 @@ export class Fighter {
     }
 
     if (Math.abs(input.moveX) > 0.25) {
-      const speed = Fighter.BASE_SPEED * this.getPhaseSpeedMultiplier();
+      const moveDir: 1 | -1 = input.moveX > 0 ? 1 : -1;
+      // Inverter direção interrompe corrida pós-dash e retorna para passo normal
+      if (this.isSprinting && moveDir !== this.dashDir) {
+        this.isSprinting = false;
+      }
+      const baseMoveSpeed = this.isSprinting
+        ? Fighter.SPRINT_SPEED
+        : Fighter.BASE_SPEED;
+      const speed = baseMoveSpeed * this.getPhaseSpeedMultiplier();
       const targetVx = input.moveX * speed;
       this.vx += (targetVx - this.vx) * Math.min(1, dt * 26);
-      this.facing = input.moveX > 0 ? 1 : -1;
+      this.facing = moveDir;
 
-      // Evita animação de corrida deslizando no lugar contra a borda da arena
-      const blockedByLeftWall = this.x <= this.arenaLeft + 1 && this.facing < 0;
-      const blockedByRightWall = this.x >= this.arenaRight - 1 && this.facing > 0;
-      const desiredState: FighterState =
-        blockedByLeftWall || blockedByRightWall ? 'idle' : 'run';
+      // Evita animação de locomoção deslizando no lugar contra a borda da arena
+      const desiredState = this.resolveGroundedMoveState(input.moveX);
+      if (desiredState === 'idle') {
+        this.isSprinting = false;
+      }
       if (this.state !== desiredState) {
         this.state = desiredState;
         this.stateTime = 0;
       }
     } else {
       // Parada imediata ao soltar direcional (elimina deslize / ghost walking)
+      this.isSprinting = false;
       this.vx = 0;
       if (this.state !== 'idle') {
         this.state = 'idle';
@@ -1027,28 +1070,12 @@ export class Fighter {
       this.vx = 0;
     }
 
-    // Dispara Projétil (A3) OU VFX acoplado/direcionado (A1/A2/A4), sem duplicação
-    const vfxLen = this.phasePack.vfx.get(spec.vfx)?.length ?? 0;
-    const vfxTriggerProgress =
-      !spec.isProjectile && vfxLen >= 12 ? 0.02 : spec.activeStart;
-
-    if (spec.isProjectile) {
-      if (progress >= spec.activeStart && !this.projectileSpawned) {
-        this.projectileSpawned = true;
-        this.callbacks?.onSpawnProjectile(this, spec);
-      }
-    } else if (progress >= vfxTriggerProgress && !this.vfxSpawned) {
-      this.vfxSpawned = true;
-      const baseReach = spec.action === 'ataque_4' ? 112 : 82;
-      const offsetDist = Number.isFinite(this.nearestEnemyDist)
-        ? Math.max(58, Math.min(baseReach, this.nearestEnemyDist * 0.55))
-        : baseReach;
-      const baseChestY =
-        Math.abs(this.attackDirY) < 0.2 ? this.y + spec.offsetY : this.y - 96;
-      const vfxX = this.x + this.attackDirX * offsetDist;
-      const vfxY = baseChestY + this.attackDirY * offsetDist;
-      const followOwner = spec.action === 'ataque_2' || vfxLen >= 12;
-      this.callbacks?.onSpawnAttackVfx(this, spec, vfxX, vfxY, followOwner);
+    // Dispara Projétil (A3) apenas a partir de activeStart.
+    // Impactos corpo a corpo (A1/A2/A4) disparam seus efeitos no momento real de colisão (CombatSystem.checkMeleeHit)
+    // sobre o defensor atingido, evitando explosões prematuras presas ao atacante em 0.02.
+    if (spec.isProjectile && progress >= spec.activeStart && !this.projectileSpawned) {
+      this.projectileSpawned = true;
+      this.callbacks?.onSpawnProjectile(this, spec);
     }
 
     // Encadeamento fluido de combo (e jump cancel) após acertar o golpe
@@ -1172,6 +1199,7 @@ export class Fighter {
 
     this.state = action;
     this.stateTime = 0;
+    this.isSprinting = false;
     this.attackHitDone = false;
     this.hitTargetsInCurrentAttack.clear();
     this.projectileSpawned = false;
@@ -1249,6 +1277,7 @@ export class Fighter {
   ): { blocked: boolean; finalDamage: number } {
     const blocked = this.isBlockingHit(attackerX);
     const pushDir = this.x >= attackerX ? 1 : -1;
+    this.isSprinting = false;
 
     if (blocked) {
       const chipDamage = Math.max(4, Math.round(rawDamage * 0.18));
@@ -1594,7 +1623,10 @@ export class Fighter {
 
     let idx = 0;
     if (this.state === 'idle') {
-      const fps = frames.length >= 10 ? 9 : frames.length >= 6 ? 8 : 6.5;
+      const fps = frames.length >= 10 ? 6.5 : frames.length >= 6 ? 8 : 6.5;
+      idx = Math.floor(this.stateTime * fps) % frames.length;
+    } else if (this.state === 'walk') {
+      const fps = frames.length >= 10 ? 10.5 : 8.5;
       idx = Math.floor(this.stateTime * fps) % frames.length;
     } else if (this.state === 'run') {
       const fps = frames.length >= 10 ? 16 : frames.length >= 8 ? 15 : frames.length >= 6 ? 13 : 11;

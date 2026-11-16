@@ -46,9 +46,9 @@ export default defineConfig({
             urlPattern: /\/assets\/characters\/.*\.(webp|png)$/i,
             handler: 'CacheFirst',
             options: {
-              cacheName: 'ak-character-assets-v2',
+              cacheName: 'ak-character-assets-v4',
               expiration: {
-                maxEntries: 6500,
+                maxEntries: 15000,
                 maxAgeSeconds: 60 * 60 * 24 * 30,
               },
               cacheableResponse: {

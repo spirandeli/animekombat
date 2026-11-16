@@ -103,6 +103,17 @@ function rectsOverlap(a: Rect, b: Rect): boolean {
   );
 }
 
+function getRectIntersectionCenter(a: Rect, b: Rect): { x: number; y: number } {
+  const ix0 = Math.max(a.x, b.x);
+  const ix1 = Math.min(a.x + a.w, b.x + b.w);
+  const iy0 = Math.max(a.y, b.y);
+  const iy1 = Math.min(a.y + a.h, b.y + b.h);
+  if (ix1 <= ix0 || iy1 <= iy0) {
+    return { x: b.x + b.w * 0.5, y: b.y + b.h * 0.5 };
+  }
+  return { x: (ix0 + ix1) * 0.5, y: (iy0 + iy1) * 0.5 };
+}
+
 export class CombatSystem {
   // Pools pré-alocados (zero garbage collection em combate, dimensionados para até 6 lutadores)
   private readonly vfxPool: VfxInstance[] = Array.from({ length: 42 }, () => ({
@@ -231,6 +242,51 @@ export class CombatSystem {
         return;
       }
     }
+  }
+
+  private getImpactSlice(
+    frames: LoadedFrame[],
+    isProjectileImpact = false
+  ): LoadedFrame[] {
+    if (frames.length <= 4) return frames;
+    const startRatio = isProjectileImpact ? 0.55 : frames.length >= 20 ? 0.45 : 0.3;
+    const start = Math.min(
+      frames.length - 3,
+      Math.max(1, Math.floor(frames.length * startRatio))
+    );
+    return frames.slice(start);
+  }
+
+  public spawnImpactVfx(
+    attacker: Fighter,
+    spec: AttackSpec,
+    impactX: number,
+    impactY: number,
+    blocked = false
+  ): void {
+    const frames = attacker.phasePack.vfx.get(spec.vfx);
+    if (!frames || frames.length === 0) return;
+    const impactFrames = this.getImpactSlice(frames, false);
+    const refQuadH = impactFrames[0].meta.quadH || 384;
+    const baseScale =
+      spec.action === 'ataque_4' ? 0.72 : spec.action === 'ataque_2' ? 0.6 : 0.52;
+    const normScale =
+      (blocked ? baseScale * 0.72 : baseScale) * (384 / Math.max(240, refQuadH));
+    const duration = blocked ? 0.24 : spec.action === 'ataque_4' ? 0.62 : 0.36;
+    const angle = Math.atan2(
+      attacker.attackDirY,
+      attacker.attackDirX * attacker.facing
+    );
+    this.enqueueVfxFrames(
+      impactFrames,
+      impactX,
+      impactY,
+      attacker.facing,
+      duration,
+      normScale,
+      undefined,
+      angle
+    );
   }
 
   public spawnVfx(
@@ -610,15 +666,19 @@ export class CombatSystem {
       attacker.x
     );
 
-    const impactX = (attacker.x + defender.x) * 0.5;
-    const impactY = defender.y - 95;
+    const { x: impactX, y: impactY } = getRectIntersectionCenter(
+      activeHit.rect,
+      hurtbox
+    );
 
     if (result.blocked) {
+      this.spawnImpactVfx(attacker, spec, impactX, impactY, true);
       this.spawnBurstParticles(impactX, impactY, '#38bdf8', 10, 220);
       this.spawnFloatingText(defender.x, defender.y - 165, 'DEFESA', '#38bdf8', 0.9);
       this.hitStopRemaining = Math.max(this.hitStopRemaining, spec.hitStop * 0.6);
       attacker.addCombatXpAndEnergy(4, 6);
     } else {
+      this.spawnImpactVfx(attacker, spec, impactX, impactY, false);
       const color =
         spec.action === 'ataque_4'
           ? '#facc15'
@@ -696,11 +756,11 @@ export class CombatSystem {
       if (proj.life <= 0 || outOfBounds) {
         if (!outOfBounds && proj.frames.length >= 2) {
           this.enqueueVfxFrames(
-            proj.frames.slice(Math.max(0, proj.frames.length - 2)),
+            this.getImpactSlice(proj.frames, true),
             proj.x,
             proj.y,
             proj.facing,
-            0.24,
+            0.26,
             0.48 * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
             undefined,
             proj.angle
@@ -727,15 +787,19 @@ export class CombatSystem {
       if (!defender) continue;
 
       const attacker = fighters.find((f) => f.slot === proj.ownerSlot);
+      const { x: impactX, y: impactY } = getRectIntersectionCenter(
+        projRect,
+        defender.getHurtbox()
+      );
       proj.active = false;
       if (proj.frames.length >= 2) {
         this.enqueueVfxFrames(
-          proj.frames.slice(Math.max(0, proj.frames.length - 2)),
-          proj.x,
-          proj.y,
+          this.getImpactSlice(proj.frames, true),
+          impactX,
+          impactY,
           proj.facing,
-          0.26,
-          0.52 * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
+          0.3,
+          0.54 * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
           undefined,
           proj.angle
         );
@@ -749,10 +813,10 @@ export class CombatSystem {
       );
 
       if (result.blocked) {
-        this.spawnBurstParticles(proj.x, proj.y, '#38bdf8', 10, 230);
+        this.spawnBurstParticles(impactX, impactY, '#38bdf8', 10, 230);
         this.spawnFloatingText(defender.x, defender.y - 165, 'DEFESA', '#38bdf8', 0.9);
       } else {
-        this.spawnBurstParticles(proj.x, proj.y, proj.auraColor, 18, 320);
+        this.spawnBurstParticles(impactX, impactY, proj.auraColor, 18, 320);
         this.spawnFloatingText(
           defender.x,
           defender.y - 175,
