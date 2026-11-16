@@ -165,7 +165,7 @@ export class ArenaScene {
 
   private arenaMap: GeneratedArenaMap = generateArenaMap(1337, false);
 
-  private camX = 640;
+  private camX = 1050;
   private camY = 390;
   private camZoom = 1.05;
 
@@ -474,9 +474,9 @@ export class ArenaScene {
       this.camY = 360;
       this.camZoom = 0.82;
     } else {
-      this.camX = 640;
+      this.camX = this.arenaMap.width * 0.5;
       this.camY = 390;
-      this.camZoom = 1.05;
+      this.camZoom = 1.02;
     }
 
     this.p1ComboFade = 0;
@@ -924,6 +924,31 @@ export class ArenaScene {
       }
       // Separação corporal executada após integrar física/velocidades para manter espaçamento limpo sem puxão
       this.combat.resolveBodyPushMulti(this.fighters, dt);
+
+      // No 1v1 estilo Street Fighter, mantém separação máxima dentro do enquadramento enquanto rola pela arena de 2100px
+      if (
+        this.roomMode !== 'rumble' &&
+        this.p1 &&
+        this.p2 &&
+        this.p1.hp > 0 &&
+        this.p2.hp > 0
+      ) {
+        const maxDuelSpan = 1020;
+        const dx = this.p2.x - this.p1.x;
+        const absDx = Math.abs(dx);
+        if (absDx > maxDuelSpan) {
+          const excess = absDx - maxDuelSpan;
+          const sign = dx >= 0 ? 1 : -1;
+          this.p1.x = Math.max(
+            this.arenaMap.arenaLeft,
+            Math.min(this.arenaMap.arenaRight, this.p1.x + sign * excess * 0.5)
+          );
+          this.p2.x = Math.max(
+            this.arenaMap.arenaLeft,
+            Math.min(this.arenaMap.arenaRight, this.p2.x - sign * excess * 0.5)
+          );
+        }
+      }
     }
 
     // Sincronização em tempo real online
@@ -999,9 +1024,12 @@ export class ArenaScene {
         this.p1.state === 'evolve' ||
         this.p2.state === 'evolve';
       const targetZoom = isDramatic
-        ? 1.18
-        : Math.max(0.82, Math.min(1.16, 1.24 - dist / 1450));
-      const targetCamX = Math.max(320, Math.min(960, midX));
+        ? 1.12
+        : Math.max(0.84, Math.min(1.12, 1.18 - dist / 1950));
+      const camPad = Math.min(460, (this.arenaMap.arenaRight - this.arenaMap.arenaLeft) * 0.32);
+      const minCamX = this.arenaMap.arenaLeft + camPad;
+      const maxCamX = this.arenaMap.arenaRight - camPad;
+      const targetCamX = Math.max(minCamX, Math.min(maxCamX, midX));
       const targetCamY = Math.max(300, Math.min(415, minY - 125));
 
       this.camX += (targetCamX - this.camX) * Math.min(1, dt * 8);
@@ -1095,9 +1123,9 @@ export class ArenaScene {
       this.camY = 360;
       this.camZoom = 0.82;
     } else {
-      this.camX = 640;
+      this.camX = this.arenaMap.width * 0.5;
       this.camY = 390;
-      this.camZoom = 1.05;
+      this.camZoom = 1.02;
     }
 
     const roundTitle =

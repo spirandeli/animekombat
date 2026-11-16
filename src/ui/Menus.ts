@@ -9,6 +9,8 @@ import { CharactersManifest, SpriteLoader } from '../engine/SpriteLoader';
 import { AIDifficulty } from '../game/AIController';
 import { ARENA_THEMES, getArenaThemeInfo } from '../game/ArenaMap';
 import { MatchConfig, MatchEndReport } from '../game/ArenaScene';
+import { BEAT_EM_UP_STAGES, BeatEmUpStageId } from '../game/BeatEmUpMap';
+import { BeatEmUpConfig, BeatEmUpEndReport } from '../game/BeatEmUpScene';
 import {
   FighterSlotId,
   NetworkClient,
@@ -32,10 +34,19 @@ import {
   xpRequiredForLevel,
 } from '../storage/SaveManager';
 
-type ScreenName = 'title' | 'select' | 'map-select' | 'rooms' | 'lobby' | 'loading' | 'none';
+type ScreenName =
+  | 'title'
+  | 'select'
+  | 'map-select'
+  | 'beatemup-select'
+  | 'rooms'
+  | 'lobby'
+  | 'loading'
+  | 'none';
 
 export interface MenusCallbacks {
   onStartMatch: (config: MatchConfig) => Promise<void>;
+  onStartBeatEmUp: (config: BeatEmUpConfig) => Promise<void>;
   onResumeMatch: () => void;
   onRestartMatch: () => void;
   onQuitToSelect: () => void;
@@ -92,6 +103,12 @@ export class Menus {
     charName: string;
   } | null = null;
 
+  private lastBeatEmUpResult: {
+    report: BeatEmUpEndReport;
+    xpSummary: ReturnType<SaveManager['recordMatchResult']>;
+    charName: string;
+  } | null = null;
+
   private selectedP1 = 'goku';
   private selectedP2 = 'luffy';
   private selectedStartPhase = 1;
@@ -104,6 +121,7 @@ export class Menus {
   private createRoomPublic = true;
   private createMapTheme = 'random';
   private selectedMapTheme = 'random';
+  private selectedBeatEmUpStage: BeatEmUpStageId = 'brasilia';
 
   // Estado de formulários e feedback (preservado entre re-renders)
   private authTab: 'login' | 'register' = 'login';
@@ -348,6 +366,15 @@ export class Menus {
     this.currentScreen = 'map-select';
     this.showPauseModal = false;
     this.lastResult = null;
+    this.lastBeatEmUpResult = null;
+    this.render();
+  }
+
+  public showBeatEmUpSelect(): void {
+    this.currentScreen = 'beatemup-select';
+    this.showPauseModal = false;
+    this.lastResult = null;
+    this.lastBeatEmUpResult = null;
     this.render();
   }
 
@@ -388,6 +415,7 @@ export class Menus {
     this.showAuthModal = false;
     this.showFriendsModal = false;
     this.lastResult = null;
+    this.lastBeatEmUpResult = null;
     this.render();
   }
 
@@ -418,7 +446,8 @@ export class Menus {
       this.showHelpModal ||
       this.showAuthModal ||
       this.showFriendsModal ||
-      this.lastResult !== null
+      this.lastResult !== null ||
+      this.lastBeatEmUpResult !== null
     );
   }
 
@@ -447,6 +476,31 @@ export class Menus {
     const charName = this.manifest.characters[cid]?.name ?? cid;
     this.lastResult = { report, xpSummary, charName };
     this.render();
+  }
+
+  public showBeatEmUpResult(
+    report: BeatEmUpEndReport,
+    xpSummary: ReturnType<SaveManager['recordMatchResult']>
+  ): void {
+    const charName = this.manifest.characters[report.charId]?.name ?? report.charId;
+    this.lastBeatEmUpResult = { report, xpSummary, charName };
+    this.render();
+  }
+
+  public getCurrentBeatEmUpConfig(): BeatEmUpConfig {
+    const prog = this.save.getCharacterProgress(this.selectedP1);
+    const maxAllowedPhase = Math.min(4, Math.max(1, prog.unlockedPhase));
+    const startPhase = Math.min(this.selectedStartPhase, maxAllowedPhase);
+    const settings = this.save.getData().settings;
+
+    return {
+      charId: this.selectedP1,
+      startPhase,
+      level: prog.level,
+      displayName: this.manifest.characters[this.selectedP1]?.name ?? this.selectedP1,
+      stageId: this.selectedBeatEmUpStage,
+      difficulty: settings.difficulty,
+    };
   }
 
   public getCurrentMatchConfig(): MatchConfig {
@@ -499,7 +553,8 @@ export class Menus {
       this.showHelpModal ||
       this.showAuthModal ||
       this.showFriendsModal ||
-      this.lastResult !== null;
+      this.lastResult !== null ||
+      this.lastBeatEmUpResult !== null;
 
     this.uiLayer.classList.toggle('hidden', !hasActiveOverlay);
     if (!hasActiveOverlay) {
@@ -515,6 +570,8 @@ export class Menus {
       html += this.renderSelectScreen();
     } else if (this.currentScreen === 'map-select') {
       html += this.renderMapSelectScreen();
+    } else if (this.currentScreen === 'beatemup-select') {
+      html += this.renderBeatEmUpSelectScreen();
     } else if (this.currentScreen === 'rooms') {
       html += this.renderRoomsScreen();
     } else if (this.currentScreen === 'lobby') {
@@ -529,6 +586,10 @@ export class Menus {
 
     if (this.lastResult) {
       html += this.renderResultModal();
+    }
+
+    if (this.lastBeatEmUpResult) {
+      html += this.renderBeatEmUpResultModal();
     }
 
     if (this.showFriendsModal) {
@@ -657,14 +718,11 @@ export class Menus {
             </button>
             <button
               id="btn-go-beatemup"
-              class="ak-btn ak-btn-ghost"
+              class="ak-btn ak-btn-accent"
               type="button"
-              disabled
-              aria-disabled="true"
-              title="Modo Beat 'em Up (Ruas do Brasil) em desenvolvimento"
-              style="opacity: 0.52; cursor: not-allowed;"
+              title="Modo Beat 'em Up: Ruas do Brasil"
             >
-              Beat 'em Up: Ruas do Brasil (Indisponível)
+              Beat 'em Up: Ruas do Brasil
             </button>
             <button id="btn-open-friends" class="ak-btn ak-btn-ghost" type="button">
               Amigos & Desafios ${pendingCount > 0 ? `<span class="ak-count-badge">${pendingCount}</span>` : ''}
@@ -1009,6 +1067,131 @@ export class Menus {
               </div>
               <div class="ak-pedestal-name">${escapeHtml(p2Char?.name ?? this.selectedP2)}</div>
               <div class="ak-pedestal-form">F${p2Phase}: ${escapeHtml(p2PhaseData?.label ?? '')}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderBeatEmUpSelectScreen(): string {
+    const chars = Object.values(this.manifest.characters);
+    const p1Char = this.manifest.characters[this.selectedP1];
+    const p1Prog = this.save.getCharacterProgress(this.selectedP1);
+    const maxUnlocked = Math.min(4, Math.max(1, p1Prog.unlockedPhase));
+    if (this.selectedStartPhase > maxUnlocked) {
+      this.selectedStartPhase = 1;
+    }
+
+    const activePhaseData =
+      p1Char?.phases[`fase_${this.selectedStartPhase}`] ?? p1Char?.phases.fase_1;
+    const p1SpriteSrc =
+      this.spriteLoader?.getMenuFullBodyUrl(this.selectedP1, this.selectedStartPhase) ??
+      activePhaseData?.actions.idle[0]?.src ??
+      '';
+
+    const stage =
+      BEAT_EM_UP_STAGES.find((s) => s.id === this.selectedBeatEmUpStage) ??
+      BEAT_EM_UP_STAGES[0];
+    const bossPortrait = `/assets/beatemup/${stage.bossId}/fase_1/idle/frame_1.webp`;
+
+    const heroCards = chars
+      .map((c) => {
+        const thumb =
+          this.spriteLoader?.getMenuPortraitUrl(c.id, 1) ??
+          c.phases.fase_1?.actions.idle[0]?.src ??
+          '';
+        return `
+          <button
+            type="button"
+            class="ak-char-card ${this.selectedP1 === c.id ? 'p1' : ''}"
+            data-pick-beu-char="${c.id}"
+          >
+            ${thumb ? `<img class="ak-char-thumb" src="${thumb}" alt="${escapeHtml(c.name)}" loading="lazy" />` : ''}
+            <span class="ak-char-name">${escapeHtml(c.name)}</span>
+          </button>
+        `;
+      })
+      .join('');
+
+    const stageCards = BEAT_EM_UP_STAGES.map(
+      (s) => `
+      <button
+        type="button"
+        class="ak-map-card ${stage.id === s.id ? 'active' : ''}"
+        data-pick-beu-stage="${s.id}"
+        style="--map-accent:${s.accentColor};"
+      >
+        <div class="ak-map-thumb">
+          <img src="${s.segmentSrcs[0]}" alt="${escapeHtml(s.name)}" loading="lazy" />
+        </div>
+        <div class="ak-map-card-meta">
+          <strong>${escapeHtml(s.name)}</strong>
+          <span>Chefão: ${escapeHtml(s.bossName)}</span>
+        </div>
+      </button>
+    `
+    ).join('');
+
+    return `
+      <div class="ak-screen ak-arcade-screen">
+        <div class="ak-panel ak-arcade-shell">
+          <div class="ak-select-header">
+            <button id="btn-back-title" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+              ← Menu
+            </button>
+            <div class="ak-arcade-banner">BEAT 'EM UP · RUAS DO BRASIL</div>
+            <button id="btn-open-settings" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+              Ajustes
+            </button>
+          </div>
+
+          <div class="ak-arcade-select ak-arcade-map-layout">
+            <div class="ak-pedestal-col ak-pedestal-p1">
+              <div class="ak-pedestal-role">HERÓI · Nv.${p1Prog.level}</div>
+              <div class="ak-pedestal-stage ak-pedestal-compact">
+                <div class="ak-pedestal-aura p1"></div>
+                ${
+                  p1SpriteSrc
+                    ? `<img class="ak-pedestal-sprite" src="${p1SpriteSrc}" alt="${escapeHtml(p1Char?.name ?? 'Herói')}" />`
+                    : ''
+                }
+                <div class="ak-pedestal-base p1"></div>
+              </div>
+              <div class="ak-pedestal-name">${escapeHtml(p1Char?.name ?? this.selectedP1)}</div>
+              <button id="btn-cycle-phase" class="ak-pedestal-form ak-pedestal-form-btn" type="button">
+                F${this.selectedStartPhase}: ${escapeHtml(activePhaseData?.label ?? '')} ↻
+              </button>
+              <div class="ak-roster-grid" style="margin-top:8px;">${heroCards}</div>
+            </div>
+
+            <div class="ak-arcade-center">
+              <div class="ak-map-preview">
+                <img class="ak-map-preview-img" src="${stage.segmentSrcs[2]}" alt="${escapeHtml(stage.name)}" />
+                <div class="ak-map-preview-overlay">
+                  <div class="ak-map-preview-title">${escapeHtml(stage.name)}</div>
+                  <div class="ak-map-preview-sub">${escapeHtml(stage.subtitle)}</div>
+                </div>
+              </div>
+
+              <div class="ak-map-grid">${stageCards}</div>
+
+              <div class="ak-arcade-center-footer">
+                <button id="btn-start-beatemup" class="ak-btn ak-btn-accent" type="button" style="min-width:240px;">
+                  Entrar nas Ruas! →
+                </button>
+              </div>
+            </div>
+
+            <div class="ak-pedestal-col ak-pedestal-cpu">
+              <div class="ak-pedestal-role">${escapeHtml(stage.bossTitle)}</div>
+              <div class="ak-pedestal-stage ak-pedestal-compact">
+                <div class="ak-pedestal-aura cpu"></div>
+                <img class="ak-pedestal-sprite mirrored" src="${bossPortrait}" alt="${escapeHtml(stage.bossName)}" />
+                <div class="ak-pedestal-base cpu"></div>
+              </div>
+              <div class="ak-pedestal-name">${escapeHtml(stage.bossName)}</div>
+              <div class="ak-pedestal-form">3 Trechos · 5 Ondas + Chefão</div>
             </div>
           </div>
         </div>
@@ -2023,6 +2206,46 @@ export class Menus {
     `;
   }
 
+  private renderBeatEmUpResultModal(): string {
+    if (!this.lastBeatEmUpResult) return '';
+    const { report, xpSummary, charName } = this.lastBeatEmUpResult;
+    const title = report.won ? 'RUAS LIBERTADAS!' : 'DERROTA NAS RUAS';
+    const titleColor = report.won ? 'var(--ak-accent)' : 'var(--ak-primary)';
+    const leveledUp = xpSummary.newLevel > xpSummary.oldLevel;
+    const unlockedNewPhase = xpSummary.newPhase > xpSummary.oldPhase;
+
+    return `
+      <div class="ak-modal-backdrop">
+        <div class="ak-modal" style="text-align:center;">
+          <h2 style="margin:0;font-size:1.9rem;color:${titleColor};">${title}</h2>
+          <p style="margin:0;color:var(--ak-muted);">
+            ${escapeHtml(charName)} (Fase ${report.finalPhase}) em <strong>${escapeHtml(report.stageName)}</strong>
+          </p>
+          <div class="ak-panel" style="padding:12px;display:grid;gap:6px;">
+            <div style="font-weight:800;color:#facc15;">Pontuação: ${report.score} PTS</div>
+            <div style="font-size:0.88rem;">Inimigos derrotados: <strong>${report.enemiesDefeated}</strong> · Maior combo: <strong>${report.maxCombo} HITS</strong></div>
+            <div style="font-size:0.88rem;">Tempo: <strong>${report.elapsedSeconds}s</strong> · HP restante: <strong>${report.hpRemainingPct}%</strong></div>
+            <div style="font-weight:800;color:var(--ak-cyan);">+${xpSummary.xpGained} XP Obtido</div>
+            <div style="font-size:0.9rem;">Nível ${xpSummary.newLevel} ${leveledUp ? '🎉 (LEVEL UP!)' : ''}</div>
+            ${
+              unlockedNewPhase
+                ? `<div style="margin-top:4px;padding:6px;border-radius:8px;background:rgba(255,184,0,0.2);color:#fde047;font-weight:800;">
+                    Nova Transformação Desbloqueada: Fase ${xpSummary.newPhase}!
+                  </div>`
+                : ''
+            }
+          </div>
+          <button id="btn-beu-rematch" class="ak-btn ak-btn-primary" type="button">
+            Jogar Novamente
+          </button>
+          <button id="btn-beu-select" class="ak-btn ak-btn-ghost" type="button">
+            Escolher Fase / Herói
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   public openPreMatchControls(
     action: () => void,
     confirmLabel = 'Pronto! (Tela Cheia)'
@@ -2466,6 +2689,7 @@ export class Menus {
     // Navegação principal
     click('btn-go-select', () => this.showSelect());
     click('btn-go-map-select', () => this.showMapSelect());
+    click('btn-go-beatemup', () => this.showBeatEmUpSelect());
     click('btn-back-select', () => this.showSelect());
     click('btn-cycle-phase', () => this.cycleSelectedPhase());
     click('btn-go-rooms', () => this.showRooms());
@@ -2555,6 +2779,37 @@ export class Menus {
       void this.callbacks.onStartMatch(this.getCurrentMatchConfig());
     });
 
+    // Seleção Beat 'em Up
+    click('btn-start-beatemup', () => {
+      this.activeMatchMode = 'solo';
+      this.openPreMatchControls(() => {
+        void this.callbacks.onStartBeatEmUp(this.getCurrentBeatEmUpConfig());
+      }, 'Entrar nas Ruas! (Tela Cheia)');
+    });
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-pick-beu-char]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        const cid = el.dataset.pickBeuChar;
+        if (!cid) return;
+        this.selectedP1 = cid;
+        const maxPh = Math.min(4, Math.max(1, this.save.getCharacterProgress(cid).unlockedPhase));
+        if (this.selectedStartPhase > maxPh) this.selectedStartPhase = 1;
+        this.render();
+      });
+    });
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-pick-beu-stage]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        const sid = el.dataset.pickBeuStage as BeatEmUpStageId | undefined;
+        if (sid) {
+          this.selectedBeatEmUpStage = sid;
+          this.render();
+        }
+      });
+    });
+
     // Pré-partida Beat 'em Up: Menu de Controles + Tela Cheia
     click('btn-prematch-ready', () => {
       this.confirmPreMatchControls();
@@ -2602,6 +2857,14 @@ export class Menus {
       if (this.activeMatchMode !== 'solo') {
         this.net.leaveRoom();
       }
+      this.callbacks.onQuitToSelect();
+    });
+    click('btn-beu-rematch', () => {
+      this.lastBeatEmUpResult = null;
+      this.callbacks.onRestartMatch();
+    });
+    click('btn-beu-select', () => {
+      this.lastBeatEmUpResult = null;
       this.callbacks.onQuitToSelect();
     });
 

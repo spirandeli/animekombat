@@ -39,7 +39,8 @@ export type CanonicalAction =
   | 'grab'
   | 'throw'
   | 'pickup'
-  | 'victory';
+  | 'victory'
+  | 'ko_defeat';
 
 export type CanonicalVfx =
   | 'vfx_ataque_1'
@@ -95,6 +96,39 @@ export interface MenuSpritesManifest {
   characters: Record<string, MenuCharacterSprites>;
 }
 
+export interface BeatEmUpEntityManifest {
+  id: string;
+  name: string;
+  kind: 'npc' | 'boss';
+  role?: string;
+  title?: string;
+  stageId?: string;
+  maxHp: number;
+  speed: number;
+  damageScale: number;
+  auraColor: string;
+  scoreValue: number;
+  refBodyWidth: number;
+  refBodyHeight: number;
+  moves?: Record<string, string>;
+  actions: Record<string, FrameMeta[]>;
+  vfx: Record<string, FrameMeta[]>;
+}
+
+export interface BeatEmUpManifest {
+  version: number;
+  generatedAt: string;
+  npcs: Record<string, BeatEmUpEntityManifest>;
+  bosses: Record<string, BeatEmUpEntityManifest>;
+}
+
+export interface LoadedBeatEmUpPack {
+  id: string;
+  manifest: BeatEmUpEntityManifest;
+  actions: Map<CanonicalAction, LoadedFrame[]>;
+  vfx: Map<CanonicalVfx, LoadedFrame[]>;
+}
+
 export interface LoadedFrame {
   image: ImageBitmap | HTMLCanvasElement | HTMLImageElement;
   meta: FrameMeta;
@@ -112,9 +146,141 @@ export interface LoadedPhasePack {
 export class SpriteLoader {
   private manifest: CharactersManifest | null = null;
   private menuManifest: MenuSpritesManifest | null = null;
+  private beatEmUpManifest: BeatEmUpManifest | null = null;
   private phaseCache = new Map<string, LoadedPhasePack>();
   private loadingPromises = new Map<string, Promise<LoadedPhasePack>>();
+  private beatEmUpCache = new Map<string, LoadedBeatEmUpPack>();
+  private beatEmUpPromises = new Map<string, Promise<LoadedBeatEmUpPack>>();
   private fallbackCache = new Map<string, LoadedFrame[]>();
+
+  public async loadBeatEmUpManifest(): Promise<BeatEmUpManifest> {
+    if (this.beatEmUpManifest) return this.beatEmUpManifest;
+    const res = await fetch('/assets/beatemup/manifest.json');
+    if (!res.ok) {
+      throw new Error(`Falha ao carregar beatemup/manifest.json (${res.status})`);
+    }
+    this.beatEmUpManifest = (await res.json()) as BeatEmUpManifest;
+    return this.beatEmUpManifest;
+  }
+
+  public getBeatEmUpManifest(): BeatEmUpManifest | null {
+    return this.beatEmUpManifest;
+  }
+
+  public getCachedBeatEmUpPack(entityId: string): LoadedBeatEmUpPack | undefined {
+    return this.beatEmUpCache.get(entityId);
+  }
+
+  public async loadBeatEmUpPack(
+    entityId: string,
+    onProgress?: (loaded: number, total: number) => void
+  ): Promise<LoadedBeatEmUpPack> {
+    const cached = this.beatEmUpCache.get(entityId);
+    if (cached) {
+      onProgress?.(1, 1);
+      return cached;
+    }
+    const inFlight = this.beatEmUpPromises.get(entityId);
+    if (inFlight) return inFlight;
+
+    const promise = (async () => {
+      const manifest = await this.loadBeatEmUpManifest();
+      const entManifest = manifest.npcs[entityId] ?? manifest.bosses[entityId];
+      if (!entManifest) {
+        throw new Error(`Entidade Beat 'em Up não encontrada: ${entityId}`);
+      }
+
+      const entries: Array<{
+        kind: 'action' | 'vfx';
+        key: string;
+        frames: FrameMeta[];
+      }> = [];
+      for (const [act, frames] of Object.entries(entManifest.actions)) {
+        entries.push({ kind: 'action', key: act, frames });
+      }
+      for (const [vfxKey, frames] of Object.entries(entManifest.vfx)) {
+        entries.push({ kind: 'vfx', key: vfxKey, frames });
+      }
+
+      const total = Math.max(
+        1,
+        entries.reduce((acc, item) => acc + item.frames.length, 0)
+      );
+      let loaded = 0;
+      const actionsMap = new Map<CanonicalAction, LoadedFrame[]>();
+      const vfxMap = new Map<CanonicalVfx, LoadedFrame[]>();
+
+      const loadSingle = async (meta: FrameMeta): Promise<LoadedFrame> => {
+        const img = await this.fetchImageBitmap(meta.src);
+        loaded++;
+        onProgress?.(loaded, total);
+        return { image: img, meta };
+      };
+
+      await Promise.all(
+        entries.map(async (entry) => {
+          const loadedFrames = await Promise.all(entry.frames.map(loadSingle));
+          if (entry.kind === 'action') {
+            actionsMap.set(entry.key as CanonicalAction, loadedFrames);
+          } else {
+            vfxMap.set(entry.key as CanonicalVfx, loadedFrames);
+          }
+        })
+      );
+
+      const pack: LoadedBeatEmUpPack = {
+        id: entityId,
+        manifest: entManifest,
+        actions: actionsMap,
+        vfx: vfxMap,
+      };
+      this.beatEmUpCache.set(entityId, pack);
+      this.beatEmUpPromises.delete(entityId);
+      return pack;
+    })();
+
+    this.beatEmUpPromises.set(entityId, promise);
+    return promise;
+  }
+
+  public async preloadBeatEmUpStage(
+    heroCharId: string,
+    heroStartPhase: number,
+    entityIds: string[],
+    onProgress?: (percent: number) => void
+  ): Promise<void> {
+    const heroKey = `${heroCharId}:${this.getPhaseKey(heroStartPhase)}`;
+    this.unloadUnused(new Set([heroKey]));
+
+    const totalTasks = 1 + entityIds.length;
+    const prog = new Array<number>(totalTasks).fill(0);
+    const tot = new Array<number>(totalTasks).fill(1);
+    const emit = () => {
+      let l = 0;
+      let t = 0;
+      for (let i = 0; i < totalTasks; i++) {
+        l += prog[i];
+        t += tot[i];
+      }
+      onProgress?.(t > 0 ? Math.min(100, Math.round((l / t) * 100)) : 100);
+    };
+
+    await Promise.all([
+      this.loadPhasePack(heroCharId, heroStartPhase, (l, total) => {
+        prog[0] = l;
+        tot[0] = Math.max(1, total);
+        emit();
+      }),
+      ...entityIds.map((eid, idx) =>
+        this.loadBeatEmUpPack(eid, (l, total) => {
+          prog[idx + 1] = l;
+          tot[idx + 1] = Math.max(1, total);
+          emit();
+        })
+      ),
+    ]);
+    onProgress?.(100);
+  }
 
   public async loadManifest(): Promise<CharactersManifest> {
     if (this.manifest) return this.manifest;

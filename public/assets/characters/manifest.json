@@ -83865,7 +83865,7 @@
           "key": "fase_4",
           "label": "Daiyoukai",
           "auraColor": "#c084fc",
-          "refBodyHeight": 284,
+          "refBodyHeight": 312,
           "refBodyWidth": 304,
           "moves": {
             "ataque_1": "Corte Daiyoukai",
@@ -271151,7 +271151,7 @@
           "key": "fase_4",
           "label": "King of Hell",
           "auraColor": "#ef4444",
-          "refBodyHeight": 256,
+          "refBodyHeight": 302,
           "refBodyWidth": 306,
           "moves": {
             "ataque_1": "Corte do Inferno",

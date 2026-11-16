@@ -53,6 +53,11 @@ export interface AttackSpec {
   lungeX: number;
   isProjectile: boolean;
   projectileSpeed: number;
+  projectileMode?: 'projectile' | 'beam';
+  projectileWidth?: number;
+  projectileHeight?: number;
+  beamRange?: number;
+  beamDuration?: number;
   rangeW: number;
   rangeH: number;
   offsetY: number;
@@ -66,8 +71,8 @@ export const ATTACK_SPECS: Record<
     action: 'ataque_1',
     vfx: 'vfx_ataque_1',
     duration: 0.5,
-    activeStart: 0.25,
-    activeEnd: 0.58,
+    activeStart: 0.34,
+    activeEnd: 0.62,
     damage: 58,
     kiCost: 0,
     kiGainOnHit: 10,
@@ -87,8 +92,8 @@ export const ATTACK_SPECS: Record<
     action: 'ataque_2',
     vfx: 'vfx_ataque_2',
     duration: 0.68,
-    activeStart: 0.27,
-    activeEnd: 0.67,
+    activeStart: 0.38,
+    activeEnd: 0.70,
     damage: 98,
     kiCost: 12,
     kiGainOnHit: 12,
@@ -108,8 +113,8 @@ export const ATTACK_SPECS: Record<
     action: 'ataque_3',
     vfx: 'vfx_ataque_3',
     duration: 0.74,
-    activeStart: 0.35,
-    activeEnd: 0.65,
+    activeStart: 0.44,
+    activeEnd: 0.72,
     damage: 115,
     kiCost: 25,
     kiGainOnHit: 10,
@@ -120,7 +125,10 @@ export const ATTACK_SPECS: Record<
     hitStop: 0.03,
     lungeX: 0,
     isProjectile: true,
-    projectileSpeed: 440,
+    projectileSpeed: 500,
+    projectileMode: 'projectile',
+    projectileWidth: 104,
+    projectileHeight: 74,
     rangeW: 110,
     rangeH: 90,
     offsetY: -98,
@@ -129,8 +137,8 @@ export const ATTACK_SPECS: Record<
     action: 'ataque_4',
     vfx: 'vfx_ataque_4',
     duration: 1.08,
-    activeStart: 0.35,
-    activeEnd: 0.75,
+    activeStart: 0.56,
+    activeEnd: 0.82,
     damage: 245,
     kiCost: 65,
     kiGainOnHit: 0,
@@ -139,10 +147,10 @@ export const ATTACK_SPECS: Record<
     knockbackY: -305,
     hitstun: 0.56,
     hitStop: 0.07,
-    lungeX: 85,
+    lungeX: 115,
     isProjectile: false,
     projectileSpeed: 0,
-    rangeW: 215,
+    rangeW: 225,
     rangeH: 170,
     offsetY: -108,
   },
@@ -201,8 +209,8 @@ export class Fighter {
   public attackDirY = 0;
   public grounded = true;
 
-  public arenaLeft = 70;
-  public arenaRight = 1210;
+  public arenaLeft = 80;
+  public arenaRight = 2020;
   public groundY = 540;
   public currentPlatformId: string | null = null;
   public dropThroughTimer = 0;
@@ -225,6 +233,7 @@ export class Fighter {
   public hitTargetsInCurrentAttack = new Set<FighterSlotId>();
   public projectileSpawned = false;
   public vfxSpawned = false;
+  private climaxLungeDone = false;
   public landingTimer = 0;
   public dashCooldown = 0;
   private dashDir: 1 | -1 = 1;
@@ -261,8 +270,8 @@ export class Fighter {
 
   // Constantes de física e escala
   public static readonly GROUND_Y = 540;
-  public static readonly ARENA_LEFT = 70;
-  public static readonly ARENA_RIGHT = 1210;
+  public static readonly ARENA_LEFT = 80;
+  public static readonly ARENA_RIGHT = 2020;
   public static readonly TARGET_BODY_HEIGHT = 186;
   private static readonly GRAVITY = 1580;
   private static readonly JUMP_VEL = -665;
@@ -340,6 +349,7 @@ export class Fighter {
     this.hitTargetsInCurrentAttack.clear();
     this.projectileSpawned = false;
     this.vfxSpawned = false;
+    this.climaxLungeDone = false;
     this.landingTimer = 0;
     this.dashCooldown = 0;
     this.knockdownBounceDone = false;
@@ -431,43 +441,254 @@ export class Fighter {
     if (this.charId === 'luffy') {
       if (action === 'ataque_1') spec = { ...base, rangeW: 195, lungeX: 0 };
       else if (action === 'ataque_2') spec = { ...base, rangeW: 215, lungeX: 145 };
-      else if (action === 'ataque_3' && this.phase <= 3) {
-        spec = { ...base, rangeW: 240, projectileSpeed: 630 };
+      else if (action === 'ataque_3') {
+        spec =
+          this.phase <= 3
+            ? {
+                ...base,
+                rangeW: 240,
+                projectileSpeed: 640,
+                projectileWidth: 112,
+                projectileHeight: 74,
+              }
+            : {
+                ...base,
+                projectileSpeed: 680,
+                projectileWidth: 124,
+                projectileHeight: 82,
+              };
+      } else if (action === 'ataque_4') {
+        spec = {
+          ...base,
+          rangeW: 255,
+          rangeH: 175,
+          lungeX: 135,
+          activeStart: 0.56,
+          activeEnd: 0.80,
+        };
       }
     } else if (this.charId === 'sukuna') {
       if (action === 'ataque_1') spec = { ...base, rangeW: 135 };
       else if (action === 'ataque_2') spec = { ...base, rangeW: 155 };
-      else if (action === 'ataque_4') spec = { ...base, rangeW: 250, rangeH: 155 };
+      else if (action === 'ataque_3') {
+        spec = {
+          ...base,
+          projectileSpeed: 620,
+          projectileWidth: 114,
+          projectileHeight: 84,
+        };
+      } else if (action === 'ataque_4') {
+        spec =
+          this.phase === 2 || this.phase === 4
+            ? {
+                ...base,
+                isProjectile: true,
+                projectileMode: 'projectile',
+                projectileSpeed: this.phase === 2 ? 690 : 660,
+                projectileWidth: 150,
+                projectileHeight: 112,
+                lungeX: 0,
+                activeStart: 0.56,
+                activeEnd: 0.84,
+              }
+            : { ...base, rangeW: 255, rangeH: 165, activeStart: 0.56, activeEnd: 0.80 };
+      }
     } else if (this.charId === 'goku') {
-      if (action === 'ataque_1') spec = { ...base, rangeW: 130 };
-      else if (action === 'ataque_2') spec = { ...base, rangeW: 150 };
-      else if (action === 'ataque_4') spec = { ...base, rangeW: 240, rangeH: 150 };
+      if (action === 'ataque_1') spec = { ...base, rangeW: 132 };
+      else if (action === 'ataque_2') spec = { ...base, rangeW: 152 };
+      else if (action === 'ataque_3') {
+        spec = {
+          ...base,
+          isProjectile: true,
+          projectileMode: 'projectile',
+          projectileSpeed: 590,
+          projectileWidth: 122,
+          projectileHeight: 76,
+          activeStart: 0.44,
+          activeEnd: 0.72,
+        };
+      } else if (action === 'ataque_4') {
+        if (this.phase === 1) {
+          spec = {
+            ...base,
+            isProjectile: true,
+            projectileMode: 'projectile',
+            projectileSpeed: 430,
+            projectileWidth: 158,
+            projectileHeight: 158,
+            lungeX: 0,
+            activeStart: 0.58,
+            activeEnd: 0.84,
+          };
+        } else if (this.phase === 2 || this.phase === 4) {
+          spec = {
+            ...base,
+            isProjectile: true,
+            projectileMode: 'beam',
+            projectileSpeed: 0,
+            beamRange: this.phase === 2 ? 880 : 820,
+            beamDuration: this.phase === 2 ? 0.68 : 0.62,
+            projectileHeight: 116,
+            lungeX: 0,
+            activeStart: 0.56,
+            activeEnd: 0.84,
+          };
+        } else {
+          // Fase 3 SSJ3: Punho do Dragão (investida pesada)
+          spec = {
+            ...base,
+            rangeW: 260,
+            rangeH: 160,
+            lungeX: 165,
+            activeStart: 0.56,
+            activeEnd: 0.80,
+          };
+        }
+      }
     } else if (this.charId === 'naruto') {
       if (action === 'ataque_1') spec = { ...base, rangeW: 132 };
       else if (action === 'ataque_2') spec = { ...base, rangeW: 155 };
-      else if (action === 'ataque_4') spec = { ...base, rangeW: 240, rangeH: 150 };
+      else if (action === 'ataque_3') {
+        spec = {
+          ...base,
+          projectileSpeed: 560,
+          projectileWidth: 118,
+          projectileHeight: 88,
+        };
+      } else if (action === 'ataque_4') {
+        spec =
+          this.phase === 2
+            ? {
+                ...base,
+                isProjectile: true,
+                projectileMode: 'projectile',
+                projectileSpeed: 540,
+                projectileWidth: 152,
+                projectileHeight: 152,
+                lungeX: 0,
+                activeStart: 0.58,
+                activeEnd: 0.84,
+              }
+            : { ...base, rangeW: 245, rangeH: 155, activeStart: 0.56, activeEnd: 0.80 };
+      }
     } else if (this.charId === 'inuyasha') {
       if (action === 'ataque_1') spec = { ...base, rangeW: 142 };
       else if (action === 'ataque_2') spec = { ...base, rangeW: 165 };
-      else if (action === 'ataque_4') spec = { ...base, rangeW: 245, rangeH: 155 };
+      else if (action === 'ataque_3') {
+        spec = {
+          ...base,
+          projectileSpeed: 590,
+          projectileWidth: 120,
+          projectileHeight: 96,
+        };
+      } else if (action === 'ataque_4') {
+        spec =
+          this.phase >= 2
+            ? {
+                ...base,
+                isProjectile: true,
+                projectileMode: 'projectile',
+                projectileSpeed: 570,
+                projectileWidth: 150,
+                projectileHeight: 134,
+                lungeX: 0,
+                activeStart: 0.56,
+                activeEnd: 0.84,
+              }
+            : { ...base, rangeW: 245, rangeH: 155, activeStart: 0.56, activeEnd: 0.80 };
+      }
     } else if (this.charId === 'seiya') {
       if (action === 'ataque_1') spec = { ...base, rangeW: 136 };
       else if (action === 'ataque_2') spec = { ...base, rangeW: 158 };
-      else if (action === 'ataque_4') spec = { ...base, rangeW: 240, rangeH: 155 };
+      else if (action === 'ataque_3') {
+        spec = {
+          ...base,
+          projectileSpeed: 640,
+          projectileWidth: 124,
+          projectileHeight: 90,
+        };
+      } else if (action === 'ataque_4') {
+        spec = {
+          ...base,
+          isProjectile: true,
+          projectileMode: 'projectile',
+          projectileSpeed: 660,
+          projectileWidth: 148,
+          projectileHeight: 120,
+          lungeX: 0,
+          activeStart: 0.56,
+          activeEnd: 0.84,
+        };
+      }
     } else if (this.charId === 'zoro') {
       if (action === 'ataque_1') spec = { ...base, rangeW: 146 };
       else if (action === 'ataque_2') spec = { ...base, rangeW: 168 };
-      else if (action === 'ataque_4') spec = { ...base, rangeW: 250, rangeH: 160 };
+      else if (action === 'ataque_3') {
+        spec = {
+          ...base,
+          projectileSpeed: 610,
+          projectileWidth: 120,
+          projectileHeight: 98,
+        };
+      } else if (action === 'ataque_4') {
+        spec = { ...base, rangeW: 255, rangeH: 165, lungeX: 120, activeStart: 0.56, activeEnd: 0.80 };
+      }
     } else if (this.charId === 'sasuke') {
       if (action === 'ataque_1') spec = { ...base, rangeW: 136 };
       else if (action === 'ataque_2') spec = { ...base, rangeW: 162 };
-      else if (action === 'ataque_4') spec = { ...base, rangeW: 245, rangeH: 155 };
+      else if (action === 'ataque_3') {
+        spec = {
+          ...base,
+          projectileSpeed: 570,
+          projectileWidth: 116,
+          projectileHeight: 86,
+        };
+      } else if (action === 'ataque_4') {
+        spec =
+          this.phase >= 3
+            ? {
+                ...base,
+                isProjectile: true,
+                projectileMode: 'projectile',
+                projectileSpeed: 740,
+                projectileWidth: 152,
+                projectileHeight: 108,
+                lungeX: 0,
+                activeStart: 0.56,
+                activeEnd: 0.84,
+              }
+            : { ...base, rangeW: 250, rangeH: 175, activeStart: 0.56, activeEnd: 0.80 };
+      }
     } else if (this.charId === 'chopper') {
       const monsterBonus = this.phase >= 4 ? 32 : 0;
       if (action === 'ataque_1') spec = { ...base, rangeW: 128 + monsterBonus };
       else if (action === 'ataque_2') spec = { ...base, rangeW: 150 + monsterBonus };
-      else if (action === 'ataque_4') {
-        spec = { ...base, rangeW: 235 + monsterBonus, rangeH: 155 + monsterBonus };
+      else if (action === 'ataque_3') {
+        spec =
+          this.phase === 2
+            ? {
+                ...base,
+                isProjectile: false,
+                lungeX: 115,
+                rangeW: 200,
+                rangeH: 140,
+                activeStart: 0.44,
+                activeEnd: 0.74,
+              }
+            : {
+                ...base,
+                projectileSpeed: 560,
+                projectileWidth: 116 + Math.round(monsterBonus * 0.6),
+                projectileHeight: 92 + Math.round(monsterBonus * 0.5),
+              };
+      } else if (action === 'ataque_4') {
+        spec = {
+          ...base,
+          rangeW: 240 + monsterBonus,
+          rangeH: 160 + monsterBonus,
+          activeStart: 0.56,
+          activeEnd: 0.80,
+        };
       }
     }
     const scaledDur = this.getScaledAttackDuration(action, spec.duration);
@@ -1070,9 +1291,19 @@ export class Fighter {
       this.vx = 0;
     }
 
-    // Dispara Projétil (A3) apenas a partir de activeStart.
-    // Impactos corpo a corpo (A1/A2/A4) disparam seus efeitos no momento real de colisão (CombatSystem.checkMeleeHit)
-    // sobre o defensor atingido, evitando explosões prematuras presas ao atacante em 0.02.
+    // Impulso no clímax para ataques pesados/Ult corpo a corpo (~1.0s em Ult de 2.0s)
+    if (
+      !this.climaxLungeDone &&
+      !spec.isProjectile &&
+      spec.lungeX > 0 &&
+      this.state === 'ataque_4' &&
+      progress >= Math.max(0.15, spec.activeStart - 0.1)
+    ) {
+      this.climaxLungeDone = true;
+      this.applyAttackLunge(this.state, { ...spec, lungeX: spec.lungeX * 1.45 });
+    }
+
+    // Dispara Projétil ou Feixe (A3 / Ults de projétil) exatamente a partir de activeStart
     if (spec.isProjectile && progress >= spec.activeStart && !this.projectileSpawned) {
       this.projectileSpawned = true;
       this.callbacks?.onSpawnProjectile(this, spec);
@@ -1204,10 +1435,14 @@ export class Fighter {
     this.hitTargetsInCurrentAttack.clear();
     this.projectileSpawned = false;
     this.vfxSpawned = false;
-    this.applyAttackLunge(action, spec);
+    this.climaxLungeDone = false;
+    // Para ataque_4 corpo a corpo, reserva o impulso forte para próximo do clímax em updateAttackState
+    if (action !== 'ataque_4' || spec.isProjectile) {
+      this.applyAttackLunge(action, spec);
+    }
     if (action === 'ataque_4') {
-      this.invulnTime = Math.max(0.35, Math.min(0.7, spec.duration * 0.35));
-      this.auraFlashTime = Math.max(0.65, spec.duration * 0.85);
+      this.invulnTime = Math.max(0.45, Math.min(0.95, spec.duration * 0.45));
+      this.auraFlashTime = Math.max(0.75, spec.duration * 0.9);
     }
 
     const sfxMap = {
@@ -1505,7 +1740,7 @@ export class Fighter {
   }
 
   private computeNormalizedFrameScale(
-    _frame: LoadedFrame,
+    frame: LoadedFrame,
     action: CanonicalAction,
     refHeight: number
   ): { scale: number; scaleX: number; scaleY: number } {
@@ -1517,7 +1752,26 @@ export class Fighter {
       }
     }
 
-    const scale = Fighter.TARGET_BODY_HEIGHT / Math.max(100, effectiveRefH);
+    let scale = Fighter.TARGET_BODY_HEIGHT / Math.max(100, effectiveRefH);
+
+    // Compensa quadros gerados em zoom-out (ex.: Luffy Gear 5, Naruto 4 Caudas, Sasuke EMS)
+    // mantendo estatura consistente durante golpes e locomoção em pé sem distorcer quedas/agachamento
+    if (
+      action !== 'crouch' &&
+      action !== 'knockdown' &&
+      action !== 'getup' &&
+      action !== 'jump' &&
+      action !== 'pickup'
+    ) {
+      const frameRawH = Math.max(80, frame.meta.rawH || frame.meta.h || effectiveRefH);
+      const heightRatio = frameRawH / Math.max(100, effectiveRefH);
+      if (heightRatio < 0.84) {
+        const targetFloorH = effectiveRefH * 0.88;
+        const boost = Math.min(1.38, Math.max(1, targetFloorH / frameRawH));
+        scale *= boost;
+      }
+    }
+
     let renderScaleX = scale;
     let renderScaleY = scale;
 

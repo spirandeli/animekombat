@@ -285,14 +285,14 @@ export function generateArenaMap(
       archetypeName: 'Arena Clássica',
       themeId: theme.id,
       themeName: theme.name,
-      width: 1280,
+      width: 2100,
       groundY: 540,
-      arenaLeft: 70,
-      arenaRight: 1210,
+      arenaLeft: 80,
+      arenaRight: 2020,
       platforms: [],
       spawnPoints: {
-        team1: [{ x: 440, y: 540 }],
-        team2: [{ x: 840, y: 540 }],
+        team1: [{ x: 790, y: 540 }],
+        team2: [{ x: 1310, y: 540 }],
       },
     };
   }
@@ -453,7 +453,7 @@ export function renderThemeBackground(
   const cachedBg = bgImageCache.get(map.themeId);
   if (cachedBg?.status === 'loaded') {
     const img = cachedBg.image;
-    const parallaxPad = map.isRumble ? 1.18 : 1.08;
+    const parallaxPad = map.isRumble ? 1.18 : map.width > 1600 ? 1.24 : 1.08;
     const scale = Math.max(cw / img.width, ch / img.height) * parallaxPad;
     const drawW = img.width * scale;
     const drawH = img.height * scale;

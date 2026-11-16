@@ -20,7 +20,7 @@ export default defineConfig({
     animeKombatBackendPlugin(),
     VitePWA({
       registerType: 'prompt',
-      includeAssets: ['assets/characters/manifest.json'],
+      includeAssets: ['assets/characters/manifest.json', 'assets/beatemup/manifest.json'],
       manifest: false,
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
@@ -28,7 +28,7 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         runtimeCaching: [
           {
-            urlPattern: /\/assets\/characters\/manifest\.json$/i,
+            urlPattern: /\/assets\/(?:characters|beatemup)\/manifest\.json$/i,
             handler: 'NetworkFirst',
             options: {
               cacheName: 'ak-character-manifest-v2',
@@ -43,7 +43,7 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: /\/assets\/characters\/.*\.(webp|png)$/i,
+            urlPattern: /\/assets\/(?:characters|beatemup)\/.*\.(webp|png)$/i,
             handler: 'CacheFirst',
             options: {
               cacheName: 'ak-character-assets-v4',

@@ -193,11 +193,25 @@ export class AIController {
         this.wantDropDown = true;
         this.moveDir = dirToTarget;
       } else if (dist > 310) {
-        // Distância longa: aproxima ou dispara projétil A3 (horizontal ou diagonal/vertical)
+        // Distância longa: aproxima ou dispara projétil (A3 ou Ultimate de projétil/feixe A4)
         this.moveDir = dirToTarget;
+        const a4Spec = self.getAttackSpec('ataque_4');
+        const a3Spec = self.getAttackSpec('ataque_3');
         if (
           canAttackGlobal &&
           withinVerticalAim &&
+          a4Spec.isProjectile &&
+          self.ki >= ATTACK_SPECS.ataque_4.kiCost &&
+          self.cooldowns.ataque_4 <= 0 &&
+          dist < (a4Spec.beamRange ?? 920) &&
+          Math.random() < 0.24 * aggression
+        ) {
+          this.queueDirectionalAttack('a4', dx, dy);
+          if (Math.abs(this.aimY) < 0.3) this.moveDir = self.facing === faceDir ? 0 : dirToTarget;
+        } else if (
+          canAttackGlobal &&
+          withinVerticalAim &&
+          a3Spec.isProjectile &&
           self.ki >= ATTACK_SPECS.ataque_3.kiCost &&
           self.cooldowns.ataque_3 <= 0 &&
           Math.random() < 0.35 * aggression

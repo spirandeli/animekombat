@@ -44,7 +44,13 @@ interface Projectile {
   frames: LoadedFrame[];
   elapsed: number;
   life: number;
+  maxLife: number;
   trailTimer: number;
+  isUlt: boolean;
+  isBeam: boolean;
+  beamRange: number;
+  tickTimer: number;
+  offsetY: number;
 }
 
 interface Particle {
@@ -153,7 +159,13 @@ export class CombatSystem {
     frames: [],
     elapsed: 0,
     life: 0,
+    maxLife: 1,
     trailTimer: 0,
+    isUlt: false,
+    isBeam: false,
+    beamRange: 0,
+    tickTimer: 0,
+    offsetY: -98,
   }));
 
   private readonly particlePool: Particle[] = Array.from({ length: 200 }, () => ({
@@ -325,20 +337,25 @@ export class CombatSystem {
     const dirY = dirLen > 0.01 ? fighter.attackDirY / dirLen : 0;
     const baseChestY =
       Math.abs(dirY) < 0.2 ? fighter.y + spec.offsetY : fighter.y - 96;
+    const isBeam = spec.projectileMode === 'beam';
+    const isUlt = spec.action === 'ataque_4';
 
     for (const proj of this.projPool) {
       if (!proj.active) {
         proj.active = true;
         proj.ownerSlot = fighter.slot;
         proj.ownerTeam = fighter.team;
-        proj.x = fighter.x + dirX * 72;
-        proj.y = baseChestY + dirY * 72;
-        proj.vx = dirX * spec.projectileSpeed;
-        proj.vy = dirY * spec.projectileSpeed;
+        proj.isUlt = isUlt;
+        proj.isBeam = isBeam;
+        proj.beamRange = isBeam ? spec.beamRange ?? 840 : 0;
+        proj.x = fighter.x + dirX * (isBeam ? 58 : 72);
+        proj.y = baseChestY + dirY * (isBeam ? 58 : 72);
+        proj.vx = isBeam ? 0 : dirX * spec.projectileSpeed;
+        proj.vy = isBeam ? 0 : dirY * spec.projectileSpeed;
         proj.facing = fighter.facing;
         proj.angle = Math.atan2(dirY, dirX * fighter.facing);
-        proj.w = 88;
-        proj.h = 68;
+        proj.w = isBeam ? proj.beamRange : spec.projectileWidth ?? (isUlt ? 148 : 96);
+        proj.h = spec.projectileHeight ?? (isBeam ? 114 : isUlt ? 124 : 72);
         proj.damage = Math.round(spec.damage * fighter.getPhaseDamageMultiplier());
         proj.knockbackX = spec.knockbackX;
         proj.knockbackY =
@@ -353,8 +370,17 @@ export class CombatSystem {
         proj.auraColor = fighter.phasePack.manifest.auraColor || '#38bdf8';
         proj.frames = frames;
         proj.elapsed = 0;
-        proj.life = 1.75;
+        proj.life = isBeam ? spec.beamDuration ?? 0.65 : isUlt ? 2.6 : 2.3;
+        proj.maxLife = proj.life;
         proj.trailTimer = 0;
+        proj.tickTimer = 0;
+        proj.offsetY = spec.offsetY;
+
+        if (isBeam) {
+          this.spawnShockwave(proj.x, proj.y, proj.auraColor, 130, 0.28);
+          this.triggerScreenShake(9, 0.24);
+          this.flashAlpha = Math.max(this.flashAlpha, 0.25);
+        }
         return;
       }
     }
@@ -730,6 +756,131 @@ export class CombatSystem {
     );
   }
 
+  private updateBeamProjectile(proj: Projectile, dt: number, fighters: Fighter[]): void {
+    const owner = fighters.find((f) => f.slot === proj.ownerSlot);
+    if (owner && (owner.hp <= 0 || owner.state === 'hitstun' || owner.state === 'knockdown')) {
+      proj.active = false;
+      return;
+    }
+
+    const dirX = Math.cos(proj.angle) * proj.facing;
+    const dirY = Math.sin(proj.angle);
+    if (owner && owner.state === 'ataque_4') {
+      const baseChestY = Math.abs(dirY) < 0.2 ? owner.y + proj.offsetY : owner.y - 96;
+      proj.x = owner.x + dirX * 58;
+      proj.y = baseChestY + dirY * 58;
+    }
+
+    proj.elapsed += dt;
+    proj.life -= dt;
+    proj.trailTimer -= dt;
+    const extendRatio = Math.min(1, proj.elapsed / 0.14);
+    const currentLen = proj.beamRange * extendRatio;
+
+    if (proj.trailTimer <= 0) {
+      proj.trailTimer = 0.045;
+      const sampleDist = currentLen * (0.25 + Math.random() * 0.72);
+      this.spawnBurstParticles(
+        proj.x + dirX * sampleDist,
+        proj.y + dirY * sampleDist + (Math.random() - 0.5) * proj.h * 0.45,
+        proj.auraColor,
+        3,
+        140
+      );
+    }
+
+    if (proj.life <= 0) {
+      proj.active = false;
+      return;
+    }
+
+    proj.tickTimer -= dt;
+    if (proj.tickTimer > 0) return;
+    proj.tickTimer = 0.12;
+
+    const steps = 6;
+    const segRadius = Math.max(58, proj.h * 0.46);
+    const isFinalTick = proj.life <= 0.15;
+    const tickDamage = Math.max(12, Math.round(proj.damage / 5));
+
+    for (const defender of fighters) {
+      if (defender.team === proj.ownerTeam || defender.invulnTime > 0 || defender.hp <= 0) {
+        continue;
+      }
+      const hurtbox = defender.getHurtbox();
+      let hitPoint: { x: number; y: number } | null = null;
+      for (let s = 1; s <= steps; s++) {
+        const dist = (currentLen * s) / steps;
+        const cx = proj.x + dirX * dist;
+        const cy = proj.y + dirY * dist;
+        const segRect: Rect = {
+          x: cx - segRadius,
+          y: cy - segRadius,
+          w: segRadius * 2,
+          h: segRadius * 2,
+        };
+        if (rectsOverlap(segRect, hurtbox)) {
+          hitPoint = getRectIntersectionCenter(segRect, hurtbox);
+          break;
+        }
+      }
+      if (!hitPoint) continue;
+
+      const result = defender.receiveHit(
+        tickDamage,
+        isFinalTick ? proj.knockbackX : proj.knockbackX * 0.28,
+        isFinalTick ? proj.knockbackY : -45,
+        isFinalTick ? proj.hitstun : 0.22,
+        proj.x
+      );
+
+      if (result.blocked) {
+        this.spawnBurstParticles(hitPoint.x, hitPoint.y, '#38bdf8', 7, 190);
+        if (isFinalTick) {
+          this.spawnFloatingText(defender.x, defender.y - 165, 'DEFESA', '#38bdf8', 0.9);
+        }
+      } else {
+        this.spawnBurstParticles(hitPoint.x, hitPoint.y, proj.auraColor, isFinalTick ? 18 : 8, 300);
+        this.spawnFloatingText(
+          defender.x,
+          defender.y - 170,
+          `-${result.finalDamage}`,
+          '#facc15',
+          isFinalTick ? 1.25 : 0.98
+        );
+        if (isFinalTick) {
+          this.spawnShockwave(hitPoint.x, hitPoint.y, proj.auraColor, 145, 0.26);
+          this.triggerScreenShake(11, 0.22);
+          if (proj.frames.length >= 2) {
+            this.enqueueVfxFrames(
+              this.getImpactSlice(proj.frames, true),
+              hitPoint.x,
+              hitPoint.y,
+              proj.facing,
+              0.38,
+              0.72 * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
+              undefined,
+              proj.angle
+            );
+          }
+        }
+        if (owner && defender.comboHitsReceived >= 2) {
+          this.events?.onComboUpdate?.(owner.slot, defender.comboHitsReceived);
+        }
+      }
+
+      if (owner) {
+        this.events?.onHitImpact?.(
+          owner,
+          defender,
+          result.finalDamage,
+          result.blocked,
+          isFinalTick
+        );
+      }
+    }
+  }
+
   private updateProjectilesMulti(
     dt: number,
     fighters: Fighter[],
@@ -738,30 +889,42 @@ export class CombatSystem {
   ): void {
     for (const proj of this.projPool) {
       if (!proj.active) continue;
+      if (proj.isBeam) {
+        this.updateBeamProjectile(proj, dt, fighters);
+        continue;
+      }
+
       proj.x += proj.vx * dt;
       proj.y += proj.vy * dt;
       proj.elapsed += dt;
       proj.life -= dt;
       proj.trailTimer -= dt;
       if (proj.trailTimer <= 0) {
-        proj.trailTimer = 0.04;
-        this.spawnBurstParticles(proj.x, proj.y, proj.auraColor, 2, 70);
+        proj.trailTimer = proj.isUlt ? 0.028 : 0.04;
+        this.spawnBurstParticles(
+          proj.x,
+          proj.y,
+          proj.auraColor,
+          proj.isUlt ? 4 : 2,
+          proj.isUlt ? 120 : 70
+        );
       }
 
       const outOfBounds =
-        proj.x < arenaLeft - 160 ||
-        proj.x > arenaRight + 160 ||
-        proj.y < -280 ||
+        proj.x < arenaLeft - 220 ||
+        proj.x > arenaRight + 220 ||
+        proj.y < -300 ||
         proj.y > 920;
       if (proj.life <= 0 || outOfBounds) {
         if (!outOfBounds && proj.frames.length >= 2) {
+          const baseScale = proj.isUlt ? 0.72 : 0.48;
           this.enqueueVfxFrames(
             this.getImpactSlice(proj.frames, true),
             proj.x,
             proj.y,
             proj.facing,
-            0.26,
-            0.48 * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
+            proj.isUlt ? 0.42 : 0.26,
+            baseScale * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
             undefined,
             proj.angle
           );
@@ -793,13 +956,14 @@ export class CombatSystem {
       );
       proj.active = false;
       if (proj.frames.length >= 2) {
+        const impScale = proj.isUlt ? 0.8 : 0.56;
         this.enqueueVfxFrames(
           this.getImpactSlice(proj.frames, true),
           impactX,
           impactY,
           proj.facing,
-          0.3,
-          0.54 * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
+          proj.isUlt ? 0.48 : 0.3,
+          impScale * (384 / Math.max(240, proj.frames[0].meta.quadH || 384)),
           undefined,
           proj.angle
         );
@@ -813,26 +977,36 @@ export class CombatSystem {
       );
 
       if (result.blocked) {
-        this.spawnBurstParticles(impactX, impactY, '#38bdf8', 10, 230);
+        this.spawnBurstParticles(impactX, impactY, '#38bdf8', 12, 240);
         this.spawnFloatingText(defender.x, defender.y - 165, 'DEFESA', '#38bdf8', 0.9);
       } else {
-        this.spawnBurstParticles(impactX, impactY, proj.auraColor, 18, 320);
+        this.spawnBurstParticles(
+          impactX,
+          impactY,
+          proj.auraColor,
+          proj.isUlt ? 24 : 18,
+          proj.isUlt ? 400 : 320
+        );
         this.spawnFloatingText(
           defender.x,
           defender.y - 175,
           `-${result.finalDamage}`,
-          '#38bdf8',
-          1.1
+          proj.isUlt ? '#facc15' : '#38bdf8',
+          proj.isUlt ? 1.3 : 1.1
         );
         if (attacker) {
           attacker.ki = Math.min(attacker.maxKi, attacker.ki + proj.kiGain);
-          attacker.addCombatXpAndEnergy(14, 18);
+          attacker.addCombatXpAndEnergy(proj.isUlt ? 24 : 14, proj.isUlt ? 28 : 18);
           if (defender.comboHitsReceived >= 2) {
             this.events?.onComboUpdate?.(attacker.slot, defender.comboHitsReceived);
           }
         }
         this.hitStopRemaining = Math.max(this.hitStopRemaining, proj.hitStop);
-        this.triggerScreenShake(7, 0.16);
+        this.triggerScreenShake(proj.isUlt ? 14 : 7, proj.isUlt ? 0.28 : 0.16);
+        if (proj.isUlt) {
+          this.flashAlpha = Math.max(this.flashAlpha, 0.32);
+          this.spawnShockwave(impactX, impactY, proj.auraColor, 155, 0.28);
+        }
       }
 
       if (attacker) {
@@ -1001,9 +1175,79 @@ export class CombatSystem {
       }
     }
 
-    // Projéteis animados em loop durante o voo
+    // Projéteis e Feixes Contínuos animados
     for (const proj of this.projPool) {
       if (!proj.active) continue;
+      if (proj.isBeam) {
+        const extendRatio = Math.min(1, proj.elapsed / 0.14);
+        const fadeRatio = proj.life < 0.14 ? Math.max(0, proj.life / 0.14) : 1;
+        const beamLen = Math.max(80, proj.beamRange * extendRatio);
+        const pulse = 1 + 0.12 * Math.sin(proj.elapsed * 38);
+        const outerRadius = proj.h * 0.52 * pulse;
+        const coreRadius = proj.h * 0.24 * pulse;
+
+        ctx.save();
+        ctx.translate(proj.x, proj.y);
+        ctx.scale(proj.facing, 1);
+        if (proj.angle !== 0) {
+          ctx.rotate(proj.angle);
+        }
+        ctx.globalAlpha = fadeRatio;
+        ctx.globalCompositeOperation = 'lighter';
+
+        // Brilho externo colorido do feixe
+        const beamGrad = ctx.createLinearGradient(0, -outerRadius, 0, outerRadius);
+        beamGrad.addColorStop(0, 'rgba(255,255,255,0)');
+        beamGrad.addColorStop(0.25, `${proj.auraColor}99`);
+        beamGrad.addColorStop(0.5, '#ffffff');
+        beamGrad.addColorStop(0.75, `${proj.auraColor}99`);
+        beamGrad.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = beamGrad;
+        ctx.beginPath();
+        ctx.roundRect(-14, -outerRadius, beamLen + 28, outerRadius * 2, outerRadius);
+        ctx.fill();
+
+        // Núcleo branco intenso
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.roundRect(0, -coreRadius, beamLen, coreRadius * 2, coreRadius);
+        ctx.fill();
+
+        // Orbe de emissão na origem das mãos
+        ctx.beginPath();
+        ctx.arc(8, 0, outerRadius * 0.85, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        // Quadros de VFX estilizados ao longo do feixe e na ponta
+        if (proj.frames.length > 0) {
+          const flyIdx =
+            proj.frames.length >= 16
+              ? Math.floor(proj.frames.length * 0.35) +
+                (Math.floor(proj.elapsed * 20) % Math.max(1, Math.floor(proj.frames.length * 0.3)))
+              : Math.floor(proj.elapsed * 18) % proj.frames.length;
+          const frame = proj.frames[Math.min(proj.frames.length - 1, flyIdx)];
+          const beamScale = 0.62 * (384 / Math.max(240, frame.meta.quadH || 384)) * pulse;
+          const stamps = 4;
+          const dirX = Math.cos(proj.angle) * proj.facing;
+          const dirY = Math.sin(proj.angle);
+          for (let s = 0; s < stamps; s++) {
+            const dist = (beamLen * s) / Math.max(1, stamps - 0.6);
+            this.drawCelVfxFrame(
+              ctx,
+              frame,
+              proj.x + dirX * dist,
+              proj.y + dirY * dist,
+              proj.facing,
+              s === 0 || s === stamps - 1 ? beamScale * 1.15 : beamScale * 0.9,
+              0.85 * fadeRatio,
+              proj.angle
+            );
+          }
+        }
+        continue;
+      }
+
       if (proj.frames.length > 0) {
         let idx = 0;
         if (proj.frames.length >= 15) {
@@ -1020,10 +1264,21 @@ export class CombatSystem {
           idx = Math.floor(proj.elapsed * 14) % Math.max(1, flyCount);
         }
         const frame = proj.frames[idx];
+        const sizeBoost = Math.max(0.46, Math.min(0.92, (Math.max(proj.w, proj.h) / 92) * 0.48));
         const normScale =
-          0.44 *
+          sizeBoost *
           (384 / Math.max(240, frame.meta.quadH || 384)) *
           (1 + 0.05 * Math.sin(proj.elapsed * 26));
+        if (proj.isUlt) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = 0.28;
+          ctx.fillStyle = proj.auraColor;
+          ctx.beginPath();
+          ctx.arc(proj.x, proj.y, Math.max(proj.w, proj.h) * 0.45, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
         this.drawCelVfxFrame(
           ctx,
           frame,
@@ -1038,7 +1293,7 @@ export class CombatSystem {
         ctx.save();
         ctx.fillStyle = proj.auraColor;
         ctx.beginPath();
-        ctx.arc(proj.x, proj.y, 24, 0, Math.PI * 2);
+        ctx.arc(proj.x, proj.y, proj.isUlt ? 42 : 24, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }
