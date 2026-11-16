@@ -890,8 +890,11 @@ export class CombatSystem {
       const exact = progress * v.frames.length;
       const idx = Math.min(v.frames.length - 1, Math.floor(exact));
       const frac = exact - idx;
+      const fadeStart = v.frames.length >= 12 ? 0.86 : 0.72;
       const fadeAlpha =
-        progress > 0.72 ? Math.max(0, 1 - (progress - 0.72) / 0.28) : 1;
+        progress > fadeStart
+          ? Math.max(0, 1 - (progress - fadeStart) / (1 - fadeStart))
+          : 1;
       const popScale =
         v.scale *
         (progress < 0.14
@@ -938,9 +941,20 @@ export class CombatSystem {
     for (const proj of this.projPool) {
       if (!proj.active) continue;
       if (proj.frames.length > 0) {
-        const flyCount =
-          proj.frames.length > 2 ? proj.frames.length - 2 : proj.frames.length;
-        const idx = Math.floor(proj.elapsed * 14) % Math.max(1, flyCount);
+        let idx = 0;
+        if (proj.frames.length >= 15) {
+          const startIdx = Math.floor(proj.frames.length * 0.35);
+          const endIdx = Math.max(
+            startIdx + 1,
+            Math.floor(proj.frames.length * 0.72)
+          );
+          const span = endIdx - startIdx;
+          idx = startIdx + (Math.floor(proj.elapsed * 16) % span);
+        } else {
+          const flyCount =
+            proj.frames.length > 2 ? proj.frames.length - 2 : proj.frames.length;
+          idx = Math.floor(proj.elapsed * 14) % Math.max(1, flyCount);
+        }
         const frame = proj.frames[idx];
         const normScale =
           0.44 *

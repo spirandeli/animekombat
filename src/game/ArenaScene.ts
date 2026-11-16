@@ -333,12 +333,14 @@ export class ArenaScene {
       f.setCombatPace(this.combatPace);
       f.setCallbacks({
         onSpawnAttackVfx: (attacker, spec, x, y, followOwner) => {
+          const vfxLen = attacker.phasePack.vfx.get(spec.vfx)?.length ?? 0;
+          const vfxDuration = vfxLen >= 12 ? spec.duration : spec.duration * 0.85;
           this.combat.spawnVfx(
             attacker,
             spec.vfx,
             x,
             y,
-            spec.duration * 0.85,
+            vfxDuration,
             spec.action === 'ataque_4' ? 0.72 : 0.54,
             followOwner
           );
