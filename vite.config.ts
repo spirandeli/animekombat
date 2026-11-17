@@ -62,7 +62,7 @@ export default defineConfig({
             options: {
               cacheName: 'ak-background-assets-v1',
               expiration: {
-                maxEntries: 20,
+                maxEntries: 80,
                 maxAgeSeconds: 60 * 60 * 24 * 30,
               },
               cacheableResponse: {

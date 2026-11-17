@@ -473,6 +473,24 @@ body {
   align-items: flex-end;
 }
 
+.ak-beu-coop-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ak-fighter-hud.compact {
+  gap: 2px;
+}
+
+.ak-fighter-hud.compact .ak-hp-track {
+  height: 11px;
+}
+
+.ak-fighter-hud.compact .ak-mini-track {
+  height: 5px;
+}
+
 .ak-hud-name-row {
   display: flex;
   align-items: center;

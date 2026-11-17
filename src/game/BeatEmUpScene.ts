@@ -8,6 +8,11 @@ import {
   LoadedPhasePack,
   SpriteLoader,
 } from '../engine/SpriteLoader';
+import type {
+  BeatEmUpEventPayload,
+  BeatEmUpSyncPayload,
+  NetworkClient,
+} from '../net/NetworkClient';
 import { VirtualControls } from '../ui/VirtualControls';
 import { AIDifficulty } from './AIController';
 import {
@@ -19,6 +24,16 @@ import {
 } from './BeatEmUpMap';
 import { ATTACK_SPECS } from './Fighter';
 
+export interface BeatEmUpParticipantConfig {
+  slot: 'p1' | 'p2';
+  userId: string | null;
+  displayName: string;
+  charId: string;
+  startPhase: number;
+  level: number;
+  isBot: boolean;
+}
+
 export interface BeatEmUpConfig {
   charId: string;
   startPhase: number;
@@ -26,6 +41,11 @@ export interface BeatEmUpConfig {
   displayName?: string;
   stageId: BeatEmUpStageId;
   difficulty: AIDifficulty;
+  mode?: 'solo' | 'room-bot' | 'online';
+  localSlot?: 'p1' | 'p2';
+  hostSlot?: 'p1' | 'p2';
+  roomCode?: string;
+  players?: BeatEmUpParticipantConfig[];
 }
 
 export interface BeatEmUpEndReport {
@@ -40,6 +60,8 @@ export interface BeatEmUpEndReport {
   elapsedSeconds: number;
   hpRemainingPct: number;
   xpEarned: number;
+  mode?: 'solo' | 'room-bot' | 'online';
+  isCoop?: boolean;
 }
 
 type ActorState =
@@ -68,6 +90,8 @@ type ActorState =
 interface BeatActor {
   uid: number;
   kind: 'player' | 'npc' | 'boss';
+  slot?: 'p1' | 'p2';
+  controlMode?: 'local' | 'remote' | 'bot';
   entityId: string;
   displayName: string;
   title?: string;
@@ -181,6 +205,32 @@ interface BeatPickup {
 const GRAVITY = 1950;
 const JUMP_VEL = -760;
 
+function createEmptyBeatInput(): FighterInputState {
+  return {
+    moveX: 0,
+    moveY: 0,
+    left: false,
+    right: false,
+    up: false,
+    down: false,
+    a1: false,
+    a2: false,
+    a3: false,
+    a4: false,
+    block: false,
+    dash: false,
+    jump: false,
+    evolve: false,
+    justA1: false,
+    justA2: false,
+    justA3: false,
+    justA4: false,
+    justDash: false,
+    justJump: false,
+    justEvolve: false,
+  };
+}
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -197,15 +247,19 @@ export class BeatEmUpScene {
   private readonly input: InputManager;
   private readonly virtualControls: VirtualControls;
   private readonly audio: AudioManager;
+  private net: NetworkClient | null = null;
 
   private active = false;
   private ended = false;
   private stage: BeatEmUpStageConfig = getBeatEmUpStage('brasilia');
   private difficulty: AIDifficulty = 'medium';
   private config: BeatEmUpConfig | null = null;
+  private matchMode: 'solo' | 'room-bot' | 'online' = 'solo';
+  private localSlot: 'p1' | 'p2' = 'p1';
+  private hostSlot: 'p1' | 'p2' = 'p1';
 
   private nextUid = 1;
-  private player: BeatActor | null = null;
+  private players: BeatActor[] = [];
   private enemies: BeatActor[] = [];
   private pickups: BeatPickup[] = [];
   private projectiles: BeatProjectile[] = [];
@@ -214,7 +268,7 @@ export class BeatEmUpScene {
 
   private camLeftWorld = 0;
   private lockMinX = 0;
-  private lockMaxX = 4608;
+  private lockMaxX = this.stage.worldWidth;
   private activeWaveIndex = -1;
   private triggeredWaveIds = new Set<string>();
   private clearedWaveIds = new Set<string>();
@@ -234,6 +288,11 @@ export class BeatEmUpScene {
   private endDelayTimer = 0;
   private pendingResultWon: boolean | null = null;
 
+  private syncAccumulator = 0;
+  private syncSeq = 0;
+  private lastRemoteSeq = -1;
+  private remoteTargetPos = new Map<'p1' | 'p2', { x: number; z: number }>();
+
   private debugOverlay = false;
   private lastDirTap: { dir: -1 | 1; time: number } | null = null;
   private prevInputLeft = false;
@@ -244,12 +303,18 @@ export class BeatEmUpScene {
   private onStageEnded?: (report: BeatEmUpEndReport) => void;
 
   private hudRefs: {
-    hpFill?: HTMLElement;
-    hpTrail?: HTMLElement;
-    kiFill?: HTMLElement;
-    evoFill?: HTMLElement;
-    evoReady?: HTMLElement;
-    phaseBadge?: HTMLElement;
+    playerBars: Map<
+      'p1' | 'p2',
+      {
+        hpFill?: HTMLElement;
+        hpTrail?: HTMLElement;
+        kiFill?: HTMLElement;
+        evoFill?: HTMLElement;
+        evoReady?: HTMLElement;
+        phaseBadge?: HTMLElement;
+        downTag?: HTMLElement;
+      }
+    >;
     score?: HTMLElement;
     combo?: HTMLElement;
     waveLabel?: HTMLElement;
@@ -259,7 +324,9 @@ export class BeatEmUpScene {
     bossTitle?: HTMLElement;
     bossHpFill?: HTMLElement;
     fps?: HTMLElement;
-  } = {};
+  } = {
+    playerBars: new Map(),
+  };
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -293,6 +360,10 @@ export class BeatEmUpScene {
     }
   };
 
+  public setNetworkClient(net: NetworkClient): void {
+    this.net = net;
+  }
+
   public setCallbacks(
     onPauseRequested: () => void,
     onStageEnded: (report: BeatEmUpEndReport) => void
@@ -305,16 +376,107 @@ export class BeatEmUpScene {
     return this.active;
   }
 
+  public isOnlineMatch(): boolean {
+    return this.active && this.matchMode === 'online';
+  }
+
+  private isHostAuthority(): boolean {
+    return this.matchMode !== 'online' || this.localSlot === this.hostSlot;
+  }
+
+  private getLocalPlayer(): BeatActor | null {
+    return this.players.find((p) => p.slot === this.localSlot) ?? this.players[0] ?? null;
+  }
+
+  private getPeerPlayer(): BeatActor | null {
+    return this.players.find((p) => p.slot !== this.localSlot) ?? null;
+  }
+
+  private createPlayerActor(
+    spec: BeatEmUpParticipantConfig,
+    x: number,
+    z: number,
+    controlMode: 'local' | 'remote' | 'bot'
+  ): BeatActor {
+    const heroPack = this.spriteLoader.getCachedPhase(spec.charId, spec.startPhase);
+    if (!heroPack) {
+      throw new Error(`Hero phase pack not preloaded for ${spec.charId} F${spec.startPhase}`);
+    }
+    const charInfo = this.spriteLoader.getCharacter(spec.charId);
+    const displayName = spec.displayName || charInfo?.name || spec.charId;
+    const hpBonus = 1 + (Math.max(1, spec.level) - 1) * 0.035;
+    const maxHp = Math.round(1250 * hpBonus);
+
+    return {
+      uid: this.nextUid++,
+      kind: 'player',
+      slot: spec.slot,
+      controlMode,
+      entityId: spec.charId,
+      displayName,
+      x,
+      z,
+      airY: 0,
+      vx: 0,
+      vz: 0,
+      vyAir: 0,
+      facing: 1,
+      hp: maxHp,
+      maxHp,
+      ki: 60,
+      maxKi: 100,
+      evoEnergy: 0,
+      phase: spec.startPhase,
+      state: 'idle',
+      stateTime: 0,
+      stateDuration: 0.5,
+      invulnTime: 0,
+      hitstunTime: 0,
+      attackHitTargets: new Set(),
+      projectileSpawned: false,
+      vfxSpawned: false,
+      comboCount: 0,
+      comboTimer: 0,
+      comboBufferNext: false,
+      comboChainQueued: null,
+      cooldowns: { ataque_1: 0, ataque_2: 0, ataque_3: 0, ataque_4: 0 },
+      dashCooldown: 0,
+      targetBodyHeight: 264,
+      auraColor: heroPack.manifest.auraColor || '#38bdf8',
+      scoreValue: 0,
+      damageScale: 1 + (Math.max(1, spec.level) - 1) * 0.025 + (spec.startPhase - 1) * 0.14,
+      moveSpeed: 330,
+      superArmor: false,
+      grabbedTargetUid: null,
+      grabbedByUid: null,
+      thrownActive: false,
+      aiThinkTimer: 0,
+      aiAttackCooldown: 0,
+      aiTelegraphTimer: 0,
+      aiQueuedAttack: null,
+      aiFlankSide: 1,
+      aiFlankZOffset: 0,
+      koTimer: 0,
+      deadDone: false,
+      bossEnraged: false,
+      heroPack,
+    };
+  }
+
   public startStage(config: BeatEmUpConfig): void {
     this.config = config;
     this.stage = getBeatEmUpStage(config.stageId);
     this.difficulty = config.difficulty;
+    this.matchMode = config.mode ?? 'solo';
+    this.localSlot = config.localSlot ?? 'p1';
+    this.hostSlot = config.hostSlot ?? 'p1';
     void preloadBeatEmUpStageBackgrounds(this.stage.id);
 
     this.input.resetAll();
     this.virtualControls.resetTouchState();
 
     this.nextUid = 1;
+    this.players = [];
     this.enemies = [];
     this.pickups = [];
     this.projectiles = [];
@@ -343,69 +505,41 @@ export class BeatEmUpScene {
     this.lastDirTap = null;
     this.prevInputLeft = false;
     this.prevInputRight = false;
+    this.syncAccumulator = 0;
+    this.syncSeq = 0;
+    this.lastRemoteSeq = -1;
+    this.remoteTargetPos.clear();
 
-    const heroPack = this.spriteLoader.getCachedPhase(config.charId, config.startPhase);
-    if (!heroPack) {
-      throw new Error(`Hero phase pack not preloaded for ${config.charId} F${config.startPhase}`);
-    }
+    const participants: BeatEmUpParticipantConfig[] =
+      config.players && config.players.length > 0
+        ? config.players.slice(0, 2)
+        : [
+            {
+              slot: 'p1',
+              userId: null,
+              displayName:
+                config.displayName ??
+                this.spriteLoader.getCharacter(config.charId)?.name ??
+                config.charId,
+              charId: config.charId,
+              startPhase: config.startPhase,
+              level: config.level,
+              isBot: false,
+            },
+          ];
 
-    const charInfo = this.spriteLoader.getCharacter(config.charId);
-    const displayName = config.displayName ?? charInfo?.name ?? config.charId;
-    const hpBonus = 1 + (Math.max(1, config.level) - 1) * 0.035;
-    const maxHp = Math.round(1250 * hpBonus);
-
-    this.player = {
-      uid: this.nextUid++,
-      kind: 'player',
-      entityId: config.charId,
-      displayName,
-      x: 240,
-      z: (this.stage.walkMinZ + this.stage.walkMaxZ) * 0.5,
-      airY: 0,
-      vx: 0,
-      vz: 0,
-      vyAir: 0,
-      facing: 1,
-      hp: maxHp,
-      maxHp,
-      ki: 60,
-      maxKi: 100,
-      evoEnergy: 0,
-      phase: config.startPhase,
-      state: 'idle',
-      stateTime: 0,
-      stateDuration: 0.5,
-      invulnTime: 0,
-      hitstunTime: 0,
-      attackHitTargets: new Set(),
-      projectileSpawned: false,
-      vfxSpawned: false,
-      comboCount: 0,
-      comboTimer: 0,
-      comboBufferNext: false,
-      comboChainQueued: null,
-      cooldowns: { ataque_1: 0, ataque_2: 0, ataque_3: 0, ataque_4: 0 },
-      dashCooldown: 0,
-      targetBodyHeight: 264,
-      auraColor: heroPack.manifest.auraColor || '#38bdf8',
-      scoreValue: 0,
-      damageScale: 1 + (Math.max(1, config.level) - 1) * 0.025 + (config.startPhase - 1) * 0.14,
-      moveSpeed: 330,
-      superArmor: false,
-      grabbedTargetUid: null,
-      grabbedByUid: null,
-      thrownActive: false,
-      aiThinkTimer: 0,
-      aiAttackCooldown: 0,
-      aiTelegraphTimer: 0,
-      aiQueuedAttack: null,
-      aiFlankSide: 1,
-      aiFlankZOffset: 0,
-      koTimer: 0,
-      deadDone: false,
-      bossEnraged: false,
-      heroPack,
-    };
+    const midZ = (this.stage.walkMinZ + this.stage.walkMaxZ) * 0.5;
+    participants.forEach((part, idx) => {
+      const controlMode: 'local' | 'remote' | 'bot' = part.isBot
+        ? 'bot'
+        : this.matchMode === 'online' && part.slot !== this.localSlot
+          ? 'remote'
+          : 'local';
+      const spawnX = participants.length > 1 ? (idx === 0 ? 210 : 300) : 240;
+      const spawnZ =
+        participants.length > 1 ? (idx === 0 ? midZ - 34 : midZ + 34) : midZ;
+      this.players.push(this.createPlayerActor(part, spawnX, spawnZ, controlMode));
+    });
 
     this.bannerText = `${this.stage.name.toUpperCase()} — AVANCE!`;
     this.bannerTimer = 2.4;
@@ -472,24 +606,51 @@ export class BeatEmUpScene {
       return;
     }
 
-    if (this.player) {
-      this.updatePlayer(this.player, rawInput, clampedDt);
+    for (const p of this.players) {
+      if (p.controlMode === 'local') {
+        this.updatePlayer(p, rawInput, clampedDt);
+      } else if (p.controlMode === 'bot') {
+        const botInput = this.computeAllyBotInput(p, clampedDt);
+        this.updatePlayer(p, botInput, clampedDt);
+      } else {
+        this.updateRemotePlayer(p, clampedDt);
+      }
     }
 
-    this.checkWaveTriggers();
+    if (this.isHostAuthority()) {
+      this.checkWaveTriggers();
 
-    for (const enemy of this.enemies) {
-      this.updateEnemy(enemy, clampedDt);
+      for (const enemy of this.enemies) {
+        this.updateEnemy(enemy, clampedDt);
+      }
+
+      this.resolvePlayerPickups();
+      this.updateProjectiles(clampedDt);
+      this.cleanupDefeatedEnemies();
+      this.checkWaveClear();
+      this.checkStageOutcome();
+    } else {
+      for (const enemy of this.enemies) {
+        enemy.stateTime += clampedDt;
+      }
+      this.updateProjectilesVisualOnly(clampedDt);
     }
 
-    this.resolvePlayerPickups();
-    this.updateProjectiles(clampedDt);
     this.updateEffects(clampedDt);
-    this.cleanupDefeatedEnemies();
-    this.checkWaveClear();
     this.updateCamera(clampedDt);
     this.updateVirtualControls();
-    this.checkStageOutcome();
+
+    if (this.matchMode === 'online' && this.net) {
+      this.syncAccumulator += clampedDt;
+      if (this.syncAccumulator >= 0.04) {
+        this.syncAccumulator = 0;
+        if (this.isHostAuthority()) {
+          this.sendHostSync();
+        } else {
+          this.sendPeerSync();
+        }
+      }
+    }
   }
 
   private getActionFrames(actor: BeatActor, action: CanonicalAction): LoadedFrame[] {
@@ -545,19 +706,21 @@ export class BeatEmUpScene {
     }
     p.ki = Math.min(p.maxKi, p.ki + dt * 7.5);
 
-    // Double-tap sprint detection
-    const justLeft = input.left && !this.prevInputLeft;
-    const justRight = input.right && !this.prevInputRight;
-    this.prevInputLeft = input.left;
-    this.prevInputRight = input.right;
-    const now = performance.now() * 0.001;
+    // Double-tap sprint detection (apenas jogador local)
     let isDoubleTapSprint = false;
-    if (justLeft || justRight) {
-      const dir: -1 | 1 = justLeft ? -1 : 1;
-      if (this.lastDirTap && this.lastDirTap.dir === dir && now - this.lastDirTap.time < 0.28) {
-        isDoubleTapSprint = true;
+    if (p.controlMode === 'local') {
+      const justLeft = input.left && !this.prevInputLeft;
+      const justRight = input.right && !this.prevInputRight;
+      this.prevInputLeft = input.left;
+      this.prevInputRight = input.right;
+      const now = performance.now() * 0.001;
+      if (justLeft || justRight) {
+        const dir: -1 | 1 = justLeft ? -1 : 1;
+        if (this.lastDirTap && this.lastDirTap.dir === dir && now - this.lastDirTap.time < 0.28) {
+          isDoubleTapSprint = true;
+        }
+        this.lastDirTap = { dir, time: now };
       }
-      this.lastDirTap = { dir, time: now };
     }
 
     p.stateTime += dt;
@@ -661,21 +824,24 @@ export class BeatEmUpScene {
       const nextPhase = p.phase + 1;
       this.evolvingPending = true;
       void this.spriteLoader.loadPhasePack(p.entityId, nextPhase).then((pack) => {
-        if (!this.player) return;
-        this.player.heroPack = pack;
-        this.player.phase = nextPhase;
-        this.player.evoEnergy = 0;
-        this.player.damageScale += 0.16;
-        this.player.auraColor = pack.manifest.auraColor || this.player.auraColor;
-        this.player.hp = Math.min(this.player.maxHp, this.player.hp + 260);
-        this.player.ki = this.player.maxKi;
-        this.player.invulnTime = 1.1;
-        this.player.state = 'evolve';
-        this.player.stateTime = 0;
-        this.player.stateDuration = 0.55;
+        if (!this.active) return;
+        p.heroPack = pack;
+        p.phase = nextPhase;
+        p.evoEnergy = 0;
+        p.damageScale += 0.16;
+        p.auraColor = pack.manifest.auraColor || p.auraColor;
+        p.hp = Math.min(p.maxHp, p.hp + 260);
+        p.ki = p.maxKi;
+        p.invulnTime = 1.1;
+        p.state = 'evolve';
+        p.stateTime = 0;
+        p.stateDuration = 0.55;
         this.audio.playSfx('evolve');
-        this.spawnText(this.player.x, this.player.z - 220, `FASE ${nextPhase}!`, '#facc15', 1.35);
+        this.spawnText(p.x, p.z - 220, `FASE ${nextPhase}!`, '#facc15', 1.35);
         this.evolvingPending = false;
+        if (this.matchMode === 'online' && this.net && p.slot) {
+          this.net.sendBeatEmUpEvent({ kind: 'evolve', slot: p.slot, phase: nextPhase });
+        }
       });
       return;
     }
@@ -686,7 +852,7 @@ export class BeatEmUpScene {
       p.z += p.vz * dt;
       this.stepAirPhysics(p, dt);
       const prog = p.stateTime / Math.max(0.01, p.stateDuration);
-      if (prog >= 0.22 && prog <= 0.78) {
+      if (this.isHostAuthority() && prog >= 0.22 && prog <= 0.78) {
         this.performMeleeHitCheck(p, 76 * p.damageScale, 155, 110, 220, -140, false, 'vfx_ataque_1');
       }
       if (p.airY >= 0) {
@@ -722,7 +888,7 @@ export class BeatEmUpScene {
           p.projectileSpawned = true;
           this.spawnPlayerProjectile(p);
         }
-      } else if (prog >= spec.activeStart && prog <= spec.activeEnd) {
+      } else if (this.isHostAuthority() && prog >= spec.activeStart && prog <= spec.activeEnd) {
         const rangeW = p.state === 'ataque_4' ? 280 : p.state === 'ataque_2' ? 165 : 148;
         const depthTol = p.state === 'ataque_4' ? 105 : 62;
         const isKd = p.state === 'ataque_2' || p.state === 'ataque_4';
@@ -797,6 +963,9 @@ export class BeatEmUpScene {
         p.stateDuration = this.computeActionDuration(p, 'air_ataque_1', 0.42);
         p.attackHitTargets.clear();
         this.audio.playSfx('atk1');
+        if (this.matchMode === 'online' && this.net && p.controlMode === 'local' && p.slot) {
+          this.net.sendBeatEmUpEvent({ kind: 'player_attack', slot: p.slot, attackAction: 'air_ataque_1' });
+        }
         return;
       }
 
@@ -929,6 +1098,9 @@ export class BeatEmUpScene {
     else if (atk === 'ataque_2') this.audio.playSfx('atk2');
     else if (atk === 'ataque_3') this.audio.playSfx('atk3');
     else this.audio.playSfx('atk4');
+    if (this.matchMode === 'online' && this.net && p.controlMode === 'local' && p.slot) {
+      this.net.sendBeatEmUpEvent({ kind: 'player_attack', slot: p.slot, attackAction: atk });
+    }
   }
 
   private spawnPlayerProjectile(p: BeatActor): void {
@@ -983,7 +1155,7 @@ export class BeatEmUpScene {
     knockdown: boolean,
     vfxKey: CanonicalVfx
   ): void {
-    const targets = attacker.kind === 'player' ? this.enemies : this.player ? [this.player] : [];
+    const targets = attacker.kind === 'player' ? this.enemies : this.players;
     const hitMinX = attacker.facing === 1 ? attacker.x - 24 : attacker.x - rangeW;
     const hitMaxX = attacker.facing === 1 ? attacker.x + rangeW : attacker.x + 24;
 
@@ -1070,8 +1242,8 @@ export class BeatEmUpScene {
       def.vyAir = Math.min(-220, kbY);
       def.thrownActive = false;
       if (def.grabbedByUid) {
-        const p = this.player;
-        if (p && p.grabbedTargetUid === def.uid) p.grabbedTargetUid = null;
+        const grabber = this.players.find((pl) => pl.uid === def.grabbedByUid);
+        if (grabber && grabber.grabbedTargetUid === def.uid) grabber.grabbedTargetUid = null;
         def.grabbedByUid = null;
       }
       if (def.kind !== 'player') {
@@ -1239,7 +1411,7 @@ export class BeatEmUpScene {
     }
 
     // AI decision & flanking movement
-    const p = this.player;
+    const p = this.getTargetPlayerForEnemy(e);
     if (!p || p.hp <= 0) {
       e.state = e.kind === 'boss' ? 'victory' : 'idle';
       return;
@@ -1369,31 +1541,64 @@ export class BeatEmUpScene {
     }
   }
 
+  private getTargetPlayerForEnemy(e: BeatActor): BeatActor | null {
+    const alive = this.players.filter((pl) => pl.hp > 0);
+    if (alive.length === 0) return null;
+    if (alive.length === 1) return alive[0];
+    const preferred = alive[e.uid % alive.length];
+    let best = alive[0];
+    let bestScore = Math.hypot(best.x - e.x, (best.z - e.z) * 1.4) - (best === preferred ? 35 : 0);
+    for (let i = 1; i < alive.length; i++) {
+      const cand = alive[i];
+      const sc = Math.hypot(cand.x - e.x, (cand.z - e.z) * 1.4) - (cand === preferred ? 35 : 0);
+      if (sc < bestScore) {
+        best = cand;
+        bestScore = sc;
+      }
+    }
+    return best;
+  }
+
   private clampActorToPlayableBounds(a: BeatActor): void {
     const pad = 42;
-    const minX = (this.arenaLocked ? this.lockMinX : 0) + pad;
-    const maxX = (this.arenaLocked ? this.lockMaxX : this.stage.worldWidth) - pad;
+    let minX = (this.arenaLocked ? this.lockMinX : 0) + pad;
+    let maxX = (this.arenaLocked ? this.lockMaxX : this.stage.worldWidth) - pad;
+    if (this.players.length > 1 && !this.arenaLocked && a.kind === 'player') {
+      const viewW = this.getViewWorldWidth();
+      minX = Math.max(minX, this.camLeftWorld + pad);
+      maxX = Math.min(maxX, this.camLeftWorld + viewW - pad);
+    }
     a.x = Math.max(minX, Math.min(maxX, a.x));
     a.z = Math.max(this.stage.walkMinZ, Math.min(this.stage.walkMaxZ, a.z));
   }
 
   private checkWaveTriggers(): void {
-    if (!this.player || this.arenaLocked) return;
+    if (this.players.length === 0 || this.arenaLocked) return;
 
     for (let i = 0; i < this.stage.waves.length; i++) {
       const wave = this.stage.waves[i];
       if (this.triggeredWaveIds.has(wave.id)) continue;
-      if (this.player.x >= wave.triggerX) {
+      if (this.players.some((pl) => pl.hp > 0 && pl.x >= wave.triggerX)) {
         this.triggeredWaveIds.add(wave.id);
         this.activeWaveIndex = i;
         this.arenaLocked = true;
         this.lockMinX = wave.lockMinX;
         this.lockMaxX = wave.lockMaxX;
+        for (const pl of this.players) {
+          this.clampActorToPlayableBounds(pl);
+        }
         this.bannerText = wave.isBossWave
           ? `CHEFÃO: ${this.stage.bossName.toUpperCase()}!`
           : `ONDA ${i + 1}: ${wave.label.toUpperCase()}`;
         this.bannerTimer = 2.2;
         this.spawnWaveEnemies(wave);
+        if (this.matchMode === 'online' && this.net) {
+          this.net.sendBeatEmUpEvent({
+            kind: 'wave_trigger',
+            waveIndex: i,
+            bannerText: this.bannerText,
+          });
+        }
         break;
       }
     }
@@ -1403,6 +1608,8 @@ export class BeatEmUpScene {
     const viewW = this.getViewWorldWidth();
     const leftEdge = Math.max(this.lockMinX + 40, this.camLeftWorld - 30);
     const rightEdge = Math.min(this.lockMaxX - 40, this.camLeftWorld + viewW + 30);
+    const coopHpScale = this.players.length > 1 ? 1.55 : 1.0;
+    const bossCoopScale = this.players.length > 1 ? 1.75 : 1.0;
 
     wave.spawns.forEach((sp, idx) => {
       const pack = this.spriteLoader.getCachedBeatEmUpPack(sp.entityId);
@@ -1414,7 +1621,7 @@ export class BeatEmUpScene {
           : Math.min(this.lockMaxX - 55, rightEdge + sp.offsetX);
       const diffHp = this.difficulty === 'easy' ? 0.78 : this.difficulty === 'master' ? 1.25 : 1.0;
       const diffDmg = this.difficulty === 'easy' ? 0.72 : this.difficulty === 'master' ? 1.28 : 1.0;
-      const maxHp = Math.round(m.maxHp * diffHp);
+      const maxHp = Math.round(m.maxHp * diffHp * (sp.isBoss ? bossCoopScale : coopHpScale));
 
       this.enemies.push({
         uid: this.nextUid++,
@@ -1473,19 +1680,21 @@ export class BeatEmUpScene {
   }
 
   private resolvePlayerPickups(): void {
-    const p = this.player;
-    if (!p || p.hp <= 0 || p.airY < -35) return;
     for (const item of this.pickups) {
       if (item.collected) continue;
-      if (Math.abs(p.x - item.x) < 58 && Math.abs(p.z - item.z) < 42) {
-        item.collected = true;
-        p.hp = Math.min(p.maxHp, p.hp + item.heal);
-        p.ki = Math.min(p.maxKi, p.ki + item.kiBoost);
-        p.state = 'pickup';
-        p.stateTime = 0;
-        p.stateDuration = 0.28;
-        this.audio.playSfx('evolve');
-        this.spawnText(item.x, item.z - 140, `+${item.heal} HP (${item.label})`, '#4ade80', 1.15);
+      for (const p of this.players) {
+        if (p.hp <= 0 || p.airY < -35) continue;
+        if (Math.abs(p.x - item.x) < 58 && Math.abs(p.z - item.z) < 42) {
+          item.collected = true;
+          p.hp = Math.min(p.maxHp, p.hp + item.heal);
+          p.ki = Math.min(p.maxKi, p.ki + item.kiBoost);
+          p.state = 'pickup';
+          p.stateTime = 0;
+          p.stateDuration = 0.28;
+          this.audio.playSfx('evolve');
+          this.spawnText(item.x, item.z - 140, `+${item.heal} HP (${item.label})`, '#4ade80', 1.15);
+          break;
+        }
       }
     }
   }
@@ -1502,13 +1711,16 @@ export class BeatEmUpScene {
       }
 
       const targets =
-        proj.ownerKind === 'player' ? this.enemies : this.player ? [this.player] : [];
+        proj.ownerKind === 'player' ? this.enemies : this.players;
       for (const def of targets) {
         if (def.hp <= 0 || def.invulnTime > 0) continue;
         if (Math.abs(def.z - proj.z) > 64) continue;
         if (Math.abs(def.x - proj.x) < 58) {
           proj.active = false;
-          const owner = proj.ownerKind === 'player' ? this.player : this.enemies.find((e) => e.uid === proj.ownerUid);
+          const owner =
+            proj.ownerKind === 'player'
+              ? this.players.find((pl) => pl.uid === proj.ownerUid) ?? this.players[0]
+              : this.enemies.find((e) => e.uid === proj.ownerUid);
           if (owner) {
             this.damageActor(
               owner,
@@ -1522,6 +1734,19 @@ export class BeatEmUpScene {
           }
           break;
         }
+      }
+    }
+    this.projectiles = this.projectiles.filter((p) => p.active);
+  }
+
+  private updateProjectilesVisualOnly(dt: number): void {
+    for (const proj of this.projectiles) {
+      if (!proj.active) continue;
+      proj.x += proj.vx * dt;
+      proj.elapsed += dt;
+      proj.life -= dt;
+      if (proj.life <= 0 || proj.x < -120 || proj.x > this.stage.worldWidth + 120) {
+        proj.active = false;
       }
     }
     this.projectiles = this.projectiles.filter((p) => p.active);
@@ -1564,6 +1789,21 @@ export class BeatEmUpScene {
       this.lockMinX = 0;
       this.lockMaxX = this.stage.worldWidth;
       this.goPromptTimer = 3.2;
+
+      // Revive parceiro caído no co-op com 35% HP ao limpar a onda
+      for (const pl of this.players) {
+        if (pl.hp <= 0) {
+          pl.hp = Math.max(1, Math.round(pl.maxHp * 0.35));
+          pl.state = 'getup';
+          pl.stateTime = 0;
+          pl.stateDuration = 0.45;
+          pl.invulnTime = 1.6;
+          pl.airY = 0;
+          pl.vyAir = 0;
+          this.spawnText(pl.x, pl.z - 160, 'REVIVEU!', '#4ade80', 1.25);
+        }
+      }
+
       if (wave.dropPickupAfterClear) {
         const d = wave.dropPickupAfterClear;
         this.pickups.push({
@@ -1578,17 +1818,34 @@ export class BeatEmUpScene {
           bobPhase: 0,
         });
       }
+
+      if (this.matchMode === 'online' && this.net) {
+        this.net.sendBeatEmUpEvent({
+          kind: 'wave_clear',
+          waveIndex: this.activeWaveIndex,
+        });
+      }
     }
   }
 
   private checkStageOutcome(): void {
-    if (this.pendingResultWon !== null || !this.player) return;
+    if (this.pendingResultWon !== null || this.players.length === 0) return;
 
-    if (this.player.hp <= 0) {
+    if (this.players.every((pl) => pl.hp <= 0)) {
       this.pendingResultWon = false;
       this.endDelayTimer = 1.65;
       this.bannerText = 'DERROTA NAS RUAS...';
       this.bannerTimer = 2.0;
+      if (this.matchMode === 'online' && this.net) {
+        this.net.sendBeatEmUpEvent({
+          kind: 'stage_end',
+          won: false,
+          score: this.score,
+          enemiesDefeated: this.enemiesDefeated,
+          maxCombo: this.maxCombo,
+          elapsedSeconds: Math.round(this.elapsedSeconds),
+        });
+      }
       return;
     }
 
@@ -1599,16 +1856,31 @@ export class BeatEmUpScene {
     ) {
       this.pendingResultWon = true;
       this.endDelayTimer = 1.9;
-      this.player.state = 'victory';
-      this.player.stateTime = 0;
+      for (const pl of this.players) {
+        if (pl.hp > 0) {
+          pl.state = 'victory';
+          pl.stateTime = 0;
+        }
+      }
       this.bannerText = 'FASE CONCLUÍDA!';
       this.bannerTimer = 2.4;
       this.audio.playSfx('ko');
+      if (this.matchMode === 'online' && this.net) {
+        this.net.sendBeatEmUpEvent({
+          kind: 'stage_end',
+          won: true,
+          score: this.score,
+          enemiesDefeated: this.enemiesDefeated,
+          maxCombo: this.maxCombo,
+          elapsedSeconds: Math.round(this.elapsedSeconds),
+        });
+      }
     }
   }
 
   private finalizeStage(won: boolean): void {
-    if (this.ended || !this.player || !this.config) return;
+    const localPlayer = this.getLocalPlayer();
+    if (this.ended || !localPlayer || !this.config) return;
     this.ended = true;
     this.active = false;
     this.audio.stopBgm();
@@ -1617,7 +1889,7 @@ export class BeatEmUpScene {
     this.virtualControls.setVisible(false);
     this.input.resetAll();
 
-    const hpPct = Math.round((this.player.hp / this.player.maxHp) * 100);
+    const hpPct = Math.round((localPlayer.hp / localPlayer.maxHp) * 100);
     const xpEarned = won
       ? 140 + Math.round(this.score * 0.03)
       : Math.max(35, 25 + this.enemiesDefeated * 12);
@@ -1626,23 +1898,30 @@ export class BeatEmUpScene {
       won,
       stageId: this.stage.id,
       stageName: this.stage.name,
-      charId: this.player.entityId,
-      finalPhase: this.player.phase,
+      charId: localPlayer.entityId,
+      finalPhase: localPlayer.phase,
       score: this.score,
       enemiesDefeated: this.enemiesDefeated,
       maxCombo: this.maxCombo,
       elapsedSeconds: Math.round(this.elapsedSeconds),
       hpRemainingPct: hpPct,
       xpEarned,
+      mode: this.matchMode,
+      isCoop: this.players.length > 1,
     });
   }
 
   private updateCamera(dt: number): void {
-    if (!this.player) return;
+    if (this.players.length === 0) return;
+    const alive = this.players.filter((pl) => pl.hp > 0);
+    const focus = alive.length > 0 ? alive : this.players;
+    const avgX = focus.reduce((sum, pl) => sum + pl.x, 0) / focus.length;
+
     const viewW = this.getViewWorldWidth();
     const minLeft = this.arenaLocked ? this.lockMinX : 0;
     const maxLeft = Math.max(minLeft, (this.arenaLocked ? this.lockMaxX : this.stage.worldWidth) - viewW);
-    const targetLeft = Math.max(minLeft, Math.min(maxLeft, this.player.x - viewW * 0.38));
+    const anchorRatio = this.players.length > 1 ? 0.44 : 0.38;
+    const targetLeft = Math.max(minLeft, Math.min(maxLeft, avgX - viewW * anchorRatio));
     this.camLeftWorld += (targetLeft - this.camLeftWorld) * Math.min(1, dt * 7.5);
   }
 
@@ -1709,9 +1988,7 @@ export class BeatEmUpScene {
     }
 
     // Y-Sort all actors by ground z ascending
-    const actors: BeatActor[] = [];
-    if (this.player) actors.push(this.player);
-    for (const e of this.enemies) actors.push(e);
+    const actors: BeatActor[] = [...this.players, ...this.enemies];
     actors.sort((a, b) => a.z - b.z);
 
     for (const actor of actors) {
@@ -1891,6 +2168,22 @@ export class BeatEmUpScene {
     ctx.drawImage(frame.image, dx, dy, dw, dh);
     ctx.restore();
 
+    // Overhead slot badge for Co-op players
+    if (actor.kind === 'player' && this.players.length > 1 && actor.slot) {
+      const label = actor.slot === 'p1' ? 'P1' : actor.controlMode === 'bot' ? 'BOT' : 'P2';
+      const pillColor = actor.slot === 'p1' ? '#38bdf8' : '#22c55e';
+      const by = drawSy - (actor.targetBodyHeight + 18) * scale;
+      ctx.save();
+      ctx.font = `900 ${Math.max(11, Math.round(14 * scale))}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = 'rgba(0,0,0,0.88)';
+      ctx.strokeText(label, sx, by);
+      ctx.fillStyle = pillColor;
+      ctx.fillText(label, sx, by);
+      ctx.restore();
+    }
+
     // Overhead mini HP bar for NPCs
     if (actor.kind === 'npc' && actor.hp > 0 && actor.hp < actor.maxHp) {
       const barW = 76 * scale;
@@ -1982,7 +2275,7 @@ export class BeatEmUpScene {
   }
 
   private updateVirtualControls(): void {
-    const p = this.player;
+    const p = this.getLocalPlayer();
     if (!p) return;
     const moves = p.heroPack?.manifest.moves ?? {};
     this.virtualControls.updateVisualState(
@@ -2012,25 +2305,40 @@ export class BeatEmUpScene {
   }
 
   private buildHud(): void {
-    const p = this.player;
-    if (!p) return;
-    this.hudEl.innerHTML = `
-      <div class="ak-hud-top">
-        <div class="ak-fighter-hud">
+    if (this.players.length === 0) return;
+    const isCoop = this.players.length > 1;
+    const renderPlayerHud = (p: BeatActor, idx: number) => {
+      const slotKey = p.slot ?? (idx === 0 ? 'p1' : 'p2');
+      const tag = slotKey.toUpperCase();
+      const isMe = p.slot === this.localSlot;
+      return `
+        <div class="ak-fighter-hud ${isCoop ? 'compact' : ''}">
           <div class="ak-name-row">
+            ${isCoop ? `<span class="ak-mini-badge ${slotKey === 'p1' ? 'cyan' : 'green'}">${tag}${isMe ? ' · VOCÊ' : ''}</span>` : ''}
             <span class="ak-fighter-name">${escapeHtml(p.displayName)}</span>
-            <span class="ak-fase-badge" id="beu-phase">F${p.phase}</span>
+            <span class="ak-fase-badge" id="beu-phase-${slotKey}">F${p.phase}</span>
+            <span class="ak-fase-badge hidden" id="beu-down-${slotKey}" style="border-color:#ef4444;background:rgba(239,68,68,0.3);color:#fecaca;">CAÍDO</span>
           </div>
           <div class="ak-hp-track">
-            <div class="ak-hp-trail" id="beu-hp-trail" style="width:100%"></div>
-            <div class="ak-hp-fill" id="beu-hp-fill" style="width:100%"></div>
+            <div class="ak-hp-trail" id="beu-hp-trail-${slotKey}" style="width:100%"></div>
+            <div class="ak-hp-fill" id="beu-hp-fill-${slotKey}" style="width:100%"></div>
           </div>
           <div class="ak-subbars">
-            <div class="ak-mini-track" title="Ki"><div class="ak-ki-fill" id="beu-ki" style="width:60%"></div></div>
-            <div class="ak-mini-track" title="Evolução"><div class="ak-evo-fill" id="beu-evo" style="width:0%"></div></div>
-            <span class="ak-fase-badge hidden" id="beu-evo-ready" style="border-color:#c084fc;background:rgba(168,85,247,0.35);color:#fef08a;">EVO! [E]</span>
+            <div class="ak-mini-track" title="Ki"><div class="ak-ki-fill" id="beu-ki-${slotKey}" style="width:60%"></div></div>
+            <div class="ak-mini-track" title="Evolução"><div class="ak-evo-fill" id="beu-evo-${slotKey}" style="width:0%"></div></div>
+            <span class="ak-fase-badge hidden" id="beu-evo-ready-${slotKey}" style="border-color:#c084fc;background:rgba(168,85,247,0.35);color:#fef08a;">EVO! [E]</span>
           </div>
         </div>
+      `;
+    };
+
+    const leftHudHtml = isCoop
+      ? `<div class="ak-beu-coop-stack">${this.players.map(renderPlayerHud).join('')}</div>`
+      : renderPlayerHud(this.players[0], 0);
+
+    this.hudEl.innerHTML = `
+      <div class="ak-hud-top">
+        ${leftHudHtml}
 
         <div class="ak-hud-center">
           <div class="ak-timer-box" id="beu-score" style="font-size:1.1rem;min-width:96px;">0 PTS</div>
@@ -2054,13 +2362,33 @@ export class BeatEmUpScene {
     `;
 
     const q = (sel: string) => this.hudEl.querySelector<HTMLElement>(sel) ?? undefined;
+    const playerBars = new Map<
+      'p1' | 'p2',
+      {
+        hpFill?: HTMLElement;
+        hpTrail?: HTMLElement;
+        kiFill?: HTMLElement;
+        evoFill?: HTMLElement;
+        evoReady?: HTMLElement;
+        phaseBadge?: HTMLElement;
+        downTag?: HTMLElement;
+      }
+    >();
+    this.players.forEach((p, idx) => {
+      const slotKey = (p.slot ?? (idx === 0 ? 'p1' : 'p2')) as 'p1' | 'p2';
+      playerBars.set(slotKey, {
+        hpFill: q(`#beu-hp-fill-${slotKey}`),
+        hpTrail: q(`#beu-hp-trail-${slotKey}`),
+        kiFill: q(`#beu-ki-${slotKey}`),
+        evoFill: q(`#beu-evo-${slotKey}`),
+        evoReady: q(`#beu-evo-ready-${slotKey}`),
+        phaseBadge: q(`#beu-phase-${slotKey}`),
+        downTag: q(`#beu-down-${slotKey}`),
+      });
+    });
+
     this.hudRefs = {
-      hpFill: q('#beu-hp-fill'),
-      hpTrail: q('#beu-hp-trail'),
-      kiFill: q('#beu-ki'),
-      evoFill: q('#beu-evo'),
-      evoReady: q('#beu-evo-ready'),
-      phaseBadge: q('#beu-phase'),
+      playerBars,
       score: q('#beu-score'),
       combo: q('#beu-combo'),
       waveLabel: q('#beu-wave-label'),
@@ -2078,29 +2406,38 @@ export class BeatEmUpScene {
   }
 
   private updateHudDom(fps: number): void {
-    const p = this.player;
-    if (!p) return;
+    const localP = this.getLocalPlayer();
+    if (!localP) return;
 
-    const hpPct = `${Math.max(0, (p.hp / p.maxHp) * 100).toFixed(1)}%`;
-    if (this.hudRefs.hpFill) this.hudRefs.hpFill.style.width = hpPct;
-    if (this.hudRefs.hpTrail) this.hudRefs.hpTrail.style.width = hpPct;
-    if (this.hudRefs.kiFill) this.hudRefs.kiFill.style.width = `${(p.ki / p.maxKi) * 100}%`;
-    if (this.hudRefs.evoFill) {
-      this.hudRefs.evoFill.style.width = `${p.phase >= 4 ? 100 : p.evoEnergy}%`;
-    }
-    if (this.hudRefs.evoReady) {
-      this.hudRefs.evoReady.classList.toggle('hidden', !(p.phase < 4 && p.evoEnergy >= 100));
-    }
-    if (this.hudRefs.phaseBadge) {
-      this.hudRefs.phaseBadge.textContent = `F${p.phase}`;
-    }
+    this.players.forEach((p, idx) => {
+      const slotKey = (p.slot ?? (idx === 0 ? 'p1' : 'p2')) as 'p1' | 'p2';
+      const refs = this.hudRefs.playerBars.get(slotKey);
+      if (!refs) return;
+      const hpPct = `${Math.max(0, (p.hp / p.maxHp) * 100).toFixed(1)}%`;
+      if (refs.hpFill) refs.hpFill.style.width = hpPct;
+      if (refs.hpTrail) refs.hpTrail.style.width = hpPct;
+      if (refs.kiFill) refs.kiFill.style.width = `${(p.ki / p.maxKi) * 100}%`;
+      if (refs.evoFill) {
+        refs.evoFill.style.width = `${p.phase >= 4 ? 100 : p.evoEnergy}%`;
+      }
+      if (refs.evoReady) {
+        refs.evoReady.classList.toggle('hidden', !(p.phase < 4 && p.evoEnergy >= 100 && p.hp > 0));
+      }
+      if (refs.phaseBadge) {
+        refs.phaseBadge.textContent = `F${p.phase}`;
+      }
+      if (refs.downTag) {
+        refs.downTag.classList.toggle('hidden', p.hp > 0);
+      }
+    });
+
     if (this.hudRefs.score) {
       this.hudRefs.score.textContent = `${this.score} PTS`;
     }
     if (this.hudRefs.combo) {
-      const showCombo = p.comboTimer > 0 && p.comboCount >= 2;
+      const showCombo = localP.comboTimer > 0 && localP.comboCount >= 2;
       this.hudRefs.combo.classList.toggle('hidden', !showCombo);
-      if (showCombo) this.hudRefs.combo.textContent = `${p.comboCount} HITS!`;
+      if (showCombo) this.hudRefs.combo.textContent = `${localP.comboCount} HITS!`;
     }
     if (this.hudRefs.waveLabel) {
       const w = this.activeWaveIndex >= 0 ? this.stage.waves[this.activeWaveIndex] : null;
@@ -2120,5 +2457,579 @@ export class BeatEmUpScene {
     if (this.hudRefs.fps) {
       this.hudRefs.fps.textContent = `${fps} FPS`;
     }
+  }
+
+  private computeAllyBotInput(bot: BeatActor, dt: number): FighterInputState {
+    const out = createEmptyBeatInput();
+    if (bot.hp <= 0) return out;
+
+    bot.aiThinkTimer = Math.max(0, bot.aiThinkTimer - dt);
+    bot.aiAttackCooldown = Math.max(0, bot.aiAttackCooldown - dt);
+
+    // Evolve automatically when ready
+    if (bot.phase < 4 && bot.evoEnergy >= 100 && bot.airY >= 0) {
+      out.justEvolve = true;
+      return out;
+    }
+
+    // Grab nearby pickup if injured
+    const pickup =
+      bot.hp < bot.maxHp * 0.72
+        ? this.pickups.find((pk) => !pk.collected)
+        : undefined;
+
+    // Otherwise target nearest alive enemy
+    let nearestEnemy: BeatActor | null = null;
+    let nearestDist = Infinity;
+    for (const e of this.enemies) {
+      if (e.hp <= 0) continue;
+      const d = Math.hypot(e.x - bot.x, (e.z - bot.z) * 1.4);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestEnemy = e;
+      }
+    }
+
+    let goalX = bot.x;
+    let goalZ = bot.z;
+    if (pickup && (!nearestEnemy || Math.hypot(pickup.x - bot.x, pickup.z - bot.z) < 260)) {
+      goalX = pickup.x;
+      goalZ = pickup.z;
+    } else if (nearestEnemy) {
+      const side = bot.x <= nearestEnemy.x ? -1 : 1;
+      goalX = nearestEnemy.x + side * 95;
+      goalZ = nearestEnemy.z;
+      const absDx = Math.abs(nearestEnemy.x - bot.x);
+      const absDz = Math.abs(nearestEnemy.z - bot.z);
+
+      if (absDx < 135 && absDz < 48 && bot.aiAttackCooldown <= 0) {
+        bot.facing = nearestEnemy.x >= bot.x ? 1 : -1;
+        if (bot.ki >= ATTACK_SPECS.ataque_4.kiCost && bot.cooldowns.ataque_4 <= 0 && nearestEnemy.kind === 'boss') {
+          out.justA4 = true;
+        } else if (bot.ki >= ATTACK_SPECS.ataque_2.kiCost && bot.cooldowns.ataque_2 <= 0 && Math.random() < 0.35) {
+          out.justA2 = true;
+        } else {
+          out.justA1 = true;
+        }
+        bot.aiAttackCooldown = this.difficulty === 'easy' ? 0.65 : this.difficulty === 'master' ? 0.25 : 0.4;
+        return out;
+      }
+    } else {
+      const leader = this.getLocalPlayer();
+      if (leader && leader !== bot) {
+        goalX = leader.x + 80;
+        goalZ = Math.max(this.stage.walkMinZ, Math.min(this.stage.walkMaxZ, leader.z + 32));
+      }
+    }
+
+    const dx = goalX - bot.x;
+    const dz = goalZ - bot.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 22) {
+      out.moveX = dx / dist;
+      out.moveY = dz / dist;
+      out.left = out.moveX < -0.25;
+      out.right = out.moveX > 0.25;
+      out.up = out.moveY < -0.25;
+      out.down = out.moveY > 0.25;
+      if (dist > 300) {
+        out.dash = true;
+      }
+    }
+    return out;
+  }
+
+  private updateRemotePlayer(p: BeatActor, dt: number): void {
+    for (const k of ['ataque_1', 'ataque_2', 'ataque_3', 'ataque_4'] as const) {
+      p.cooldowns[k] = Math.max(0, p.cooldowns[k] - dt);
+    }
+    p.dashCooldown = Math.max(0, p.dashCooldown - dt);
+    p.invulnTime = Math.max(0, p.invulnTime - dt);
+    if (p.comboTimer > 0) {
+      p.comboTimer -= dt;
+      if (p.comboTimer <= 0) p.comboCount = 0;
+    }
+    p.ki = Math.min(p.maxKi, p.ki + dt * 7.5);
+    p.stateTime += dt;
+
+    if (p.slot) {
+      const target = this.remoteTargetPos.get(p.slot);
+      if (target) {
+        const dx = target.x - p.x;
+        const dz = target.z - p.z;
+        p.x = Math.abs(dx) > 120 ? target.x : p.x + dx * Math.min(1, dt * 18);
+        p.z = Math.abs(dz) > 90 ? target.z : p.z + dz * Math.min(1, dt * 18);
+      }
+    }
+
+    if (p.airY < 0 || p.vyAir < 0) {
+      this.stepAirPhysics(p, dt);
+    }
+
+    if (this.isHostAuthority() && p.hp > 0) {
+      if (p.state === 'air_ataque_1') {
+        const prog = p.stateTime / Math.max(0.01, p.stateDuration);
+        if (prog >= 0.22 && prog <= 0.78) {
+          this.performMeleeHitCheck(p, 76 * p.damageScale, 155, 110, 220, -140, false, 'vfx_ataque_1');
+        }
+      } else if (
+        p.state === 'ataque_1' ||
+        p.state === 'ataque_2' ||
+        p.state === 'ataque_3' ||
+        p.state === 'ataque_4'
+      ) {
+        const spec = ATTACK_SPECS[p.state];
+        const prog = p.stateTime / Math.max(0.01, p.stateDuration);
+        if (!p.vfxSpawned && prog >= 0.22 && !spec.isProjectile) {
+          p.vfxSpawned = true;
+          this.spawnVfx(p, spec.vfx, p.x + p.facing * 75, p.z, -120, 0.58);
+        }
+        if (spec.isProjectile) {
+          if (!p.projectileSpawned && prog >= spec.activeStart) {
+            p.projectileSpawned = true;
+            this.spawnPlayerProjectile(p);
+          }
+        } else if (prog >= spec.activeStart && prog <= spec.activeEnd) {
+          const rangeW = p.state === 'ataque_4' ? 280 : p.state === 'ataque_2' ? 165 : 148;
+          const depthTol = p.state === 'ataque_4' ? 105 : 62;
+          const isKd = p.state === 'ataque_2' || p.state === 'ataque_4';
+          this.performMeleeHitCheck(
+            p,
+            spec.damage * p.damageScale,
+            rangeW,
+            depthTol,
+            spec.knockbackX,
+            spec.knockbackY,
+            isKd,
+            spec.vfx
+          );
+        }
+      }
+    }
+  }
+
+  private sendHostSync(): void {
+    const hostPlayer = this.getLocalPlayer();
+    if (!hostPlayer || !this.net) return;
+    const peer = this.getPeerPlayer();
+
+    const payload: BeatEmUpSyncPayload = {
+      fromSlot: this.localSlot,
+      seq: ++this.syncSeq,
+      player: {
+        slot: hostPlayer.slot ?? 'p1',
+        x: hostPlayer.x,
+        z: hostPlayer.z,
+        airY: hostPlayer.airY,
+        vx: hostPlayer.vx,
+        vz: hostPlayer.vz,
+        vyAir: hostPlayer.vyAir,
+        facing: hostPlayer.facing,
+        hp: hostPlayer.hp,
+        maxHp: hostPlayer.maxHp,
+        ki: hostPlayer.ki,
+        evoEnergy: hostPlayer.evoEnergy,
+        phase: hostPlayer.phase,
+        state: hostPlayer.state,
+        stateTime: hostPlayer.stateTime,
+        stateDuration: hostPlayer.stateDuration,
+        invulnTime: hostPlayer.invulnTime,
+        hitstunTime: hostPlayer.hitstunTime,
+      },
+      peerAuthoritative: peer
+        ? {
+            slot: peer.slot ?? 'p2',
+            hp: peer.hp,
+            maxHp: peer.maxHp,
+            ki: peer.ki,
+            evoEnergy: peer.evoEnergy,
+            invulnTime: peer.invulnTime,
+            state: peer.state,
+            vx: peer.vx,
+            vyAir: peer.vyAir,
+            hitstunTime: peer.hitstunTime,
+            x: peer.x,
+            z: peer.z,
+          }
+        : undefined,
+      world: {
+        activeWaveIndex: this.activeWaveIndex,
+        arenaLocked: this.arenaLocked,
+        lockMinX: this.lockMinX,
+        lockMaxX: this.lockMaxX,
+        triggeredWaveIds: [...this.triggeredWaveIds],
+        clearedWaveIds: [...this.clearedWaveIds],
+        goPromptTimer: this.goPromptTimer,
+        score: this.score,
+        enemiesDefeated: this.enemiesDefeated,
+        maxCombo: this.maxCombo,
+        elapsedSeconds: this.elapsedSeconds,
+      },
+      enemies: this.enemies.map((e) => ({
+        uid: e.uid,
+        kind: e.kind === 'boss' ? 'boss' : 'npc',
+        entityId: e.entityId,
+        displayName: e.displayName,
+        title: e.title,
+        x: e.x,
+        z: e.z,
+        airY: e.airY,
+        vx: e.vx,
+        facing: e.facing,
+        hp: e.hp,
+        maxHp: e.maxHp,
+        state: e.state,
+        stateTime: e.stateTime,
+        stateDuration: e.stateDuration,
+        invulnTime: e.invulnTime,
+        bossEnraged: e.bossEnraged,
+        aiTelegraphTimer: e.aiTelegraphTimer,
+        aiQueuedAttack: e.aiQueuedAttack,
+        koTimer: e.koTimer,
+        deadDone: e.deadDone,
+      })),
+      pickups: this.pickups.map((pk) => ({
+        uid: pk.uid,
+        kind: pk.kind,
+        label: pk.label,
+        x: pk.x,
+        z: pk.z,
+        heal: pk.heal,
+        kiBoost: pk.kiBoost,
+        collected: pk.collected,
+      })),
+      projectiles: this.projectiles.map((pr) => ({
+        ownerUid: pr.ownerUid,
+        ownerKind: pr.ownerKind,
+        x: pr.x,
+        z: pr.z,
+        yOffset: pr.yOffset,
+        vx: pr.vx,
+        facing: pr.facing,
+        auraColor: pr.auraColor,
+      })),
+    };
+    this.net.sendBeatEmUpSync(payload);
+  }
+
+  private sendPeerSync(): void {
+    const localPlayer = this.getLocalPlayer();
+    if (!localPlayer || !this.net) return;
+    this.net.sendBeatEmUpSync({
+      fromSlot: this.localSlot,
+      seq: ++this.syncSeq,
+      player: {
+        slot: this.localSlot,
+        x: localPlayer.x,
+        z: localPlayer.z,
+        airY: localPlayer.airY,
+        vx: localPlayer.vx,
+        vz: localPlayer.vz,
+        vyAir: localPlayer.vyAir,
+        facing: localPlayer.facing,
+        hp: localPlayer.hp,
+        maxHp: localPlayer.maxHp,
+        ki: localPlayer.ki,
+        evoEnergy: localPlayer.evoEnergy,
+        phase: localPlayer.phase,
+        state: localPlayer.state,
+        stateTime: localPlayer.stateTime,
+        stateDuration: localPlayer.stateDuration,
+        invulnTime: localPlayer.invulnTime,
+        hitstunTime: localPlayer.hitstunTime,
+      },
+    });
+  }
+
+  public applyRemoteSync(payload: BeatEmUpSyncPayload): void {
+    if (!this.active || this.matchMode !== 'online') return;
+    if (payload.fromSlot === this.localSlot) return;
+    if (payload.seq <= this.lastRemoteSeq) return;
+    this.lastRemoteSeq = payload.seq;
+
+    const remotePlayer = this.players.find((pl) => pl.slot === payload.fromSlot);
+    if (remotePlayer) {
+      const ps = payload.player;
+      this.remoteTargetPos.set(payload.fromSlot, { x: ps.x, z: ps.z });
+      remotePlayer.airY = ps.airY;
+      remotePlayer.vx = ps.vx;
+      remotePlayer.vz = ps.vz;
+      remotePlayer.vyAir = ps.vyAir;
+      remotePlayer.facing = ps.facing;
+      remotePlayer.hp = ps.hp;
+      remotePlayer.maxHp = ps.maxHp;
+      remotePlayer.ki = ps.ki;
+      remotePlayer.evoEnergy = ps.evoEnergy;
+      remotePlayer.invulnTime = ps.invulnTime;
+      remotePlayer.hitstunTime = ps.hitstunTime;
+
+      const isAttack =
+        ps.state === 'ataque_1' ||
+        ps.state === 'ataque_2' ||
+        ps.state === 'ataque_3' ||
+        ps.state === 'ataque_4' ||
+        ps.state === 'air_ataque_1';
+      if (!this.isHostAuthority() || !isAttack) {
+        if (remotePlayer.state !== ps.state) {
+          remotePlayer.state = ps.state as ActorState;
+          remotePlayer.stateTime = ps.stateTime;
+          remotePlayer.stateDuration = ps.stateDuration;
+          remotePlayer.attackHitTargets.clear();
+          remotePlayer.vfxSpawned = false;
+          remotePlayer.projectileSpawned = false;
+        }
+      }
+    }
+
+    if (this.isHostAuthority()) return;
+
+    // Non-host reconciles authoritative world, peer HP, enemies, pickups & projectiles
+    const localPlayer = this.getLocalPlayer();
+    if (localPlayer && payload.peerAuthoritative && payload.peerAuthoritative.slot === this.localSlot) {
+      const pa = payload.peerAuthoritative;
+      const wasDown = localPlayer.hp <= 0 && pa.hp > 0;
+      localPlayer.hp = pa.hp;
+      localPlayer.maxHp = pa.maxHp;
+      localPlayer.ki = pa.ki;
+      localPlayer.evoEnergy = pa.evoEnergy;
+      if (pa.invulnTime > localPlayer.invulnTime) localPlayer.invulnTime = pa.invulnTime;
+      if (wasDown) {
+        localPlayer.state = 'getup';
+        localPlayer.stateTime = 0;
+        localPlayer.stateDuration = 0.45;
+        this.spawnText(localPlayer.x, localPlayer.z - 160, 'REVIVEU!', '#4ade80', 1.25);
+      } else if (
+        (pa.state === 'hitstun' || pa.state === 'knockdown' || pa.state === 'ko_defeat') &&
+        localPlayer.state !== pa.state
+      ) {
+        localPlayer.state = pa.state as ActorState;
+        localPlayer.stateTime = 0;
+        localPlayer.vx = pa.vx;
+        localPlayer.vyAir = pa.vyAir;
+        localPlayer.hitstunTime = pa.hitstunTime;
+      }
+    }
+
+    if (payload.world) {
+      this.activeWaveIndex = payload.world.activeWaveIndex;
+      this.arenaLocked = payload.world.arenaLocked;
+      this.lockMinX = payload.world.lockMinX;
+      this.lockMaxX = payload.world.lockMaxX;
+      this.triggeredWaveIds = new Set(payload.world.triggeredWaveIds);
+      this.clearedWaveIds = new Set(payload.world.clearedWaveIds);
+      this.goPromptTimer = payload.world.goPromptTimer;
+      this.score = payload.world.score;
+      this.enemiesDefeated = payload.world.enemiesDefeated;
+      this.maxCombo = payload.world.maxCombo;
+      this.elapsedSeconds = payload.world.elapsedSeconds;
+    }
+
+    if (payload.enemies) {
+      const existingByUid = new Map(this.enemies.map((e) => [e.uid, e]));
+      const nextEnemies: BeatActor[] = [];
+      for (const es of payload.enemies) {
+        let e = existingByUid.get(es.uid);
+        if (!e) {
+          const pack = this.spriteLoader.getCachedBeatEmUpPack(es.entityId);
+          e = {
+            uid: es.uid,
+            kind: es.kind,
+            entityId: es.entityId,
+            displayName: es.displayName,
+            title: es.title,
+            x: es.x,
+            z: es.z,
+            airY: es.airY,
+            vx: es.vx,
+            vz: 0,
+            vyAir: 0,
+            facing: es.facing,
+            hp: es.hp,
+            maxHp: es.maxHp,
+            ki: 100,
+            maxKi: 100,
+            evoEnergy: 0,
+            phase: 1,
+            state: es.state as ActorState,
+            stateTime: es.stateTime,
+            stateDuration: es.stateDuration,
+            invulnTime: es.invulnTime,
+            hitstunTime: 0,
+            attackHitTargets: new Set(),
+            projectileSpawned: false,
+            vfxSpawned: false,
+            comboCount: 0,
+            comboTimer: 0,
+            comboBufferNext: false,
+            comboChainQueued: null,
+            cooldowns: { ataque_1: 0, ataque_2: 0, ataque_3: 0, ataque_4: 0 },
+            dashCooldown: 0,
+            targetBodyHeight: es.kind === 'boss' ? 306 : 262,
+            auraColor: pack?.manifest.auraColor ?? '#ef4444',
+            scoreValue: pack?.manifest.scoreValue ?? 100,
+            damageScale: 1,
+            moveSpeed: pack?.manifest.speed ?? 180,
+            superArmor: false,
+            grabbedTargetUid: null,
+            grabbedByUid: null,
+            thrownActive: false,
+            aiThinkTimer: 0,
+            aiAttackCooldown: 0,
+            aiTelegraphTimer: es.aiTelegraphTimer,
+            aiQueuedAttack: es.aiQueuedAttack as BeatActor['aiQueuedAttack'],
+            aiFlankSide: 1,
+            aiFlankZOffset: 0,
+            koTimer: es.koTimer,
+            deadDone: es.deadDone,
+            bossEnraged: es.bossEnraged,
+            enemyPack: pack,
+          };
+        } else {
+          const dx = es.x - e.x;
+          const dz = es.z - e.z;
+          e.x = Math.abs(dx) > 110 ? es.x : e.x + dx * 0.55;
+          e.z = Math.abs(dz) > 80 ? es.z : e.z + dz * 0.55;
+          e.airY = es.airY;
+          e.vx = es.vx;
+          e.facing = es.facing;
+          if (es.hp < e.hp) {
+            const diff = e.hp - es.hp;
+            this.spawnText(e.x, e.z + e.airY - e.targetBodyHeight * 0.82, `-${diff}`, diff >= 140 ? '#facc15' : '#ffffff', diff >= 140 ? 1.25 : 1.0);
+          }
+          e.hp = es.hp;
+          e.maxHp = es.maxHp;
+          if (e.state !== es.state) {
+            e.state = es.state as ActorState;
+            e.stateTime = es.stateTime;
+          }
+          e.stateDuration = es.stateDuration;
+          e.invulnTime = es.invulnTime;
+          e.bossEnraged = es.bossEnraged;
+          e.aiTelegraphTimer = es.aiTelegraphTimer;
+          e.aiQueuedAttack = es.aiQueuedAttack as BeatActor['aiQueuedAttack'];
+          e.koTimer = es.koTimer;
+          e.deadDone = es.deadDone;
+        }
+        nextEnemies.push(e);
+      }
+      this.enemies = nextEnemies;
+    }
+
+    if (payload.pickups) {
+      this.pickups = payload.pickups.map((pk) => ({
+        ...pk,
+        bobPhase: this.elapsedSeconds * 4.2,
+      }));
+    }
+
+    if (payload.projectiles) {
+      this.projectiles = payload.projectiles.map((pr) => {
+        const owner =
+          pr.ownerKind === 'player'
+            ? this.players.find((pl) => pl.uid === pr.ownerUid) ?? this.players[0]
+            : this.enemies.find((en) => en.uid === pr.ownerUid);
+        return {
+          active: true,
+          ownerUid: pr.ownerUid,
+          ownerKind: pr.ownerKind,
+          x: pr.x,
+          z: pr.z,
+          yOffset: pr.yOffset,
+          vx: pr.vx,
+          facing: pr.facing,
+          damage: 0,
+          knockbackX: 0,
+          knockdown: false,
+          frames: owner ? this.getVfxFrames(owner, 'vfx_ataque_3') : [],
+          elapsed: this.elapsedSeconds,
+          life: 1.0,
+          auraColor: pr.auraColor,
+        };
+      });
+    }
+  }
+
+  public applyRemoteEvent(ev: BeatEmUpEventPayload): void {
+    if (!this.active || this.matchMode !== 'online') return;
+
+    if (ev.kind === 'player_attack' && ev.slot && ev.slot !== this.localSlot && ev.attackAction) {
+      const remote = this.players.find((pl) => pl.slot === ev.slot);
+      if (remote && remote.hp > 0) {
+        if (ev.attackAction === 'air_ataque_1') {
+          remote.state = 'air_ataque_1';
+          remote.stateTime = 0;
+          remote.stateDuration = this.computeActionDuration(remote, 'air_ataque_1', 0.42);
+          remote.attackHitTargets.clear();
+          this.audio.playSfx('atk1');
+        } else {
+          this.startPlayerAttack(remote, ev.attackAction);
+        }
+      }
+      return;
+    }
+
+    if (ev.kind === 'evolve' && ev.slot && ev.slot !== this.localSlot && ev.phase) {
+      const remote = this.players.find((pl) => pl.slot === ev.slot);
+      const nextPhase = ev.phase;
+      if (remote) {
+        void this.spriteLoader.loadPhasePack(remote.entityId, nextPhase).then((pack) => {
+          if (!this.active) return;
+          remote.heroPack = pack;
+          remote.phase = nextPhase;
+          remote.evoEnergy = 0;
+          remote.damageScale += 0.16;
+          remote.auraColor = pack.manifest.auraColor || remote.auraColor;
+          remote.state = 'evolve';
+          remote.stateTime = 0;
+          remote.stateDuration = 0.55;
+          this.audio.playSfx('evolve');
+          this.spawnText(remote.x, remote.z - 220, `FASE ${nextPhase}!`, '#facc15', 1.35);
+        });
+      }
+      return;
+    }
+
+    if (ev.kind === 'wave_trigger' && ev.bannerText) {
+      this.bannerText = ev.bannerText;
+      this.bannerTimer = 2.2;
+      return;
+    }
+
+    if (ev.kind === 'wave_clear') {
+      this.goPromptTimer = 3.2;
+      return;
+    }
+
+    if (ev.kind === 'stage_end' && typeof ev.won === 'boolean' && this.pendingResultWon === null) {
+      this.pendingResultWon = ev.won;
+      this.endDelayTimer = ev.won ? 1.9 : 1.65;
+      if (typeof ev.score === 'number') this.score = ev.score;
+      if (typeof ev.enemiesDefeated === 'number') this.enemiesDefeated = ev.enemiesDefeated;
+      if (typeof ev.maxCombo === 'number') this.maxCombo = ev.maxCombo;
+      if (typeof ev.elapsedSeconds === 'number') this.elapsedSeconds = ev.elapsedSeconds;
+      this.bannerText = ev.won ? 'FASE CONCLUÍDA!' : 'DERROTA NAS RUAS...';
+      this.bannerTimer = 2.4;
+      if (ev.won) {
+        for (const pl of this.players) {
+          if (pl.hp > 0) {
+            pl.state = 'victory';
+            pl.stateTime = 0;
+          }
+        }
+        this.audio.playSfx('ko');
+      }
+    }
+  }
+
+  public handlePlayerLeft(slot: string, username?: string): void {
+    if (!this.active || this.matchMode !== 'online') return;
+    const idx = this.players.findIndex((pl) => pl.slot === slot);
+    if (idx >= 0) {
+      const left = this.players[idx];
+      this.spawnText(left.x, left.z - 180, `${username || left.displayName} SAIU!`, '#38bdf8', 1.25);
+      this.players.splice(idx, 1);
+    }
+    this.matchMode = this.players.length <= 1 ? 'solo' : this.matchMode;
+    this.buildHud();
   }
 }

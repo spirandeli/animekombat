@@ -1,6 +1,8 @@
 import type { FighterInputState } from '../engine/InputManager';
 import type { AIDifficulty } from '../game/AIController';
 import type { MatchConfig } from '../game/ArenaScene';
+import type { BeatEmUpStageId } from '../game/BeatEmUpMap';
+import type { BeatEmUpConfig } from '../game/BeatEmUpScene';
 import {
   teamForSlot,
   type FighterSlotId,
@@ -11,7 +13,7 @@ import { CharacterProgress, SaveManager } from '../storage/SaveManager';
 
 export { teamForSlot, type FighterSlotId, type FighterTeam };
 export type SlotMode = 'human' | 'bot' | 'closed';
-export type RoomMode = '1v1' | 'rumble';
+export type RoomMode = '1v1' | 'rumble' | 'beatemup';
 
 export interface MatchParticipantConfig {
   slot: FighterSlotId;
@@ -90,6 +92,7 @@ export interface RoomState {
   teamSize?: 1 | 2 | 3;
   mapSeed?: number;
   mapTheme?: string;
+  beatEmUpStage?: BeatEmUpStageId;
   p2Mode: 'human' | 'bot';
   botDifficulty: AIDifficulty;
   status: 'lobby' | 'fighting';
@@ -107,6 +110,7 @@ export interface OpenRoomSummary {
   roomMode?: RoomMode;
   teamSize?: 1 | 2 | 3;
   mapTheme?: string;
+  beatEmUpStage?: BeatEmUpStageId;
   occupiedCount?: number;
   humanCount?: number;
   botCount?: number;
@@ -176,6 +180,123 @@ export interface CombatEventPayload {
   matchOver?: boolean;
 }
 
+export interface BeatEmUpActorSyncSnapshot {
+  slot: 'p1' | 'p2';
+  x: number;
+  z: number;
+  airY: number;
+  vx: number;
+  vz: number;
+  vyAir: number;
+  facing: 1 | -1;
+  hp: number;
+  maxHp: number;
+  ki: number;
+  evoEnergy: number;
+  phase: number;
+  state: string;
+  stateTime: number;
+  stateDuration: number;
+  invulnTime: number;
+  hitstunTime: number;
+}
+
+export interface BeatEmUpEnemySyncSnapshot {
+  uid: number;
+  kind: 'npc' | 'boss';
+  entityId: string;
+  displayName: string;
+  title?: string;
+  x: number;
+  z: number;
+  airY: number;
+  vx: number;
+  facing: 1 | -1;
+  hp: number;
+  maxHp: number;
+  state: string;
+  stateTime: number;
+  stateDuration: number;
+  invulnTime: number;
+  bossEnraged: boolean;
+  aiTelegraphTimer: number;
+  aiQueuedAttack: string | null;
+  koTimer: number;
+  deadDone: boolean;
+}
+
+export interface BeatEmUpPickupSyncSnapshot {
+  uid: number;
+  kind: 'acai' | 'pastel' | 'coco';
+  label: string;
+  x: number;
+  z: number;
+  heal: number;
+  kiBoost: number;
+  collected: boolean;
+}
+
+export interface BeatEmUpProjectileSyncSnapshot {
+  ownerUid: number;
+  ownerKind: 'player' | 'boss';
+  x: number;
+  z: number;
+  yOffset: number;
+  vx: number;
+  facing: 1 | -1;
+  auraColor: string;
+}
+
+export interface BeatEmUpSyncPayload {
+  fromSlot: 'p1' | 'p2';
+  seq: number;
+  player: BeatEmUpActorSyncSnapshot;
+  peerAuthoritative?: {
+    slot: 'p1' | 'p2';
+    hp: number;
+    maxHp: number;
+    ki: number;
+    evoEnergy: number;
+    invulnTime: number;
+    state: string;
+    vx: number;
+    vyAir: number;
+    hitstunTime: number;
+    x: number;
+    z: number;
+  };
+  world?: {
+    activeWaveIndex: number;
+    arenaLocked: boolean;
+    lockMinX: number;
+    lockMaxX: number;
+    triggeredWaveIds: string[];
+    clearedWaveIds: string[];
+    goPromptTimer: number;
+    score: number;
+    enemiesDefeated: number;
+    maxCombo: number;
+    elapsedSeconds: number;
+  };
+  enemies?: BeatEmUpEnemySyncSnapshot[];
+  pickups?: BeatEmUpPickupSyncSnapshot[];
+  projectiles?: BeatEmUpProjectileSyncSnapshot[];
+}
+
+export interface BeatEmUpEventPayload {
+  kind: 'wave_trigger' | 'wave_clear' | 'pickup' | 'evolve' | 'stage_end' | 'player_attack';
+  slot?: 'p1' | 'p2';
+  waveIndex?: number;
+  bannerText?: string;
+  phase?: number;
+  won?: boolean;
+  score?: number;
+  enemiesDefeated?: number;
+  maxCombo?: number;
+  elapsedSeconds?: number;
+  attackAction?: 'ataque_1' | 'ataque_2' | 'ataque_3' | 'ataque_4' | 'air_ataque_1';
+}
+
 export interface NetworkEventMap {
   authChanged: UserProfile | null;
   progressSynced: Record<string, CharacterProgress>;
@@ -188,8 +309,11 @@ export interface NetworkEventMap {
   inviteReceived: RoomInvitePayload;
   inviteSent: { toUserId: string; roomCode: string };
   matchStart: MatchConfig;
+  beatEmUpStart: BeatEmUpConfig;
   remoteSync: RemoteFighterSyncPayload;
   remoteEvent: CombatEventPayload;
+  beuSync: BeatEmUpSyncPayload;
+  beuEvent: BeatEmUpEventPayload;
   opponentLeft: string;
   playerLeft: { slot: FighterSlotId; username: string };
 }
@@ -277,6 +401,7 @@ function buildLocalClosedSlot(slot: FighterSlotId): RoomSlotState {
 }
 
 function getLocalActiveSlots(room: RoomState): FighterSlotId[] {
+  if (room.roomMode === 'beatemup') return ['p1', 'p2'];
   const size = room.roomMode === 'rumble' ? Math.max(2, Math.min(3, room.teamSize ?? 3)) : 1;
   return ALL_SLOTS.slice(0, size * 2);
 }
@@ -663,10 +788,11 @@ export class NetworkClient {
   public createRoom(options?: {
     roomMode?: RoomMode;
     teamSize?: 1 | 2 | 3;
-    p2Mode?: 'human' | 'bot';
+    p2Mode?: 'human' | 'bot' | 'closed';
     botDifficulty?: AIDifficulty;
     isPublic?: boolean;
     mapTheme?: string;
+    beatEmUpStage?: BeatEmUpStageId;
     mapSeed?: number;
     fillBots?: boolean;
     charId?: string;
@@ -675,7 +801,12 @@ export class NetworkClient {
   }): void {
     const charId = options?.charId ?? 'goku';
     const prog = this.save.getCharacterProgress(charId);
-    const roomMode: RoomMode = options?.roomMode === 'rumble' ? 'rumble' : '1v1';
+    const roomMode: RoomMode =
+      options?.roomMode === 'rumble'
+        ? 'rumble'
+        : options?.roomMode === 'beatemup'
+          ? 'beatemup'
+          : '1v1';
     const teamSize: 1 | 2 | 3 =
       roomMode === 'rumble'
         ? (Math.max(2, Math.min(3, options?.teamSize ?? 3)) as 2 | 3)
@@ -688,6 +819,7 @@ export class NetworkClient {
       botDifficulty: options?.botDifficulty ?? this.save.getData().settings.difficulty,
       isPublic: options?.isPublic ?? true,
       mapTheme: options?.mapTheme ?? 'random',
+      beatEmUpStage: options?.beatEmUpStage ?? 'brasilia',
       mapSeed: options?.mapSeed ?? randomLocalSeed(),
       fillBots: Boolean(options?.fillBots),
       charId,
@@ -729,8 +861,13 @@ export class NetworkClient {
           payload.startPhase,
           payload.level
         );
+      } else if (sid === 'p2' && roomMode === 'beatemup' && payload.p2Mode === 'closed') {
+        slots[sid] = buildLocalClosedSlot(sid);
       } else {
         slots[sid] = buildLocalEmptySlot(sid);
+      }
+      if (roomMode === 'beatemup') {
+        slots[sid].team = 1;
       }
     }
 
@@ -742,7 +879,8 @@ export class NetworkClient {
       teamSize,
       mapSeed: payload.mapSeed,
       mapTheme: payload.mapTheme,
-      p2Mode: payload.p2Mode,
+      beatEmUpStage: payload.beatEmUpStage,
+      p2Mode: payload.p2Mode === 'bot' ? 'bot' : 'human',
       botDifficulty: diff,
       status: 'lobby',
       slots,
@@ -805,7 +943,7 @@ export class NetworkClient {
         const chosen = openSlots.find((sid) => teamForSlot(sid) === prefTeam) ?? openSlots[0];
         localRoom.slots[chosen] = {
           slot: chosen,
-          team: teamForSlot(chosen),
+          team: localRoom.roomMode === 'beatemup' ? 1 : teamForSlot(chosen),
           slotMode: 'human',
           userId: this.getActorId(),
           username: this.getDisplayName(),
@@ -855,6 +993,7 @@ export class NetworkClient {
     botStartPhase?: number;
     isPublic?: boolean;
     mapTheme?: string;
+    beatEmUpStage?: BeatEmUpStageId;
     rerollSeed?: boolean;
     fillBots?: boolean;
     openAllHuman?: boolean;
@@ -881,12 +1020,16 @@ export class NetworkClient {
     if (patch.botDifficulty) room.botDifficulty = patch.botDifficulty;
     if (typeof patch.isPublic === 'boolean') room.isPublic = patch.isPublic;
     if (patch.mapTheme !== undefined) room.mapTheme = patch.mapTheme;
+    if (patch.beatEmUpStage !== undefined) room.beatEmUpStage = patch.beatEmUpStage;
     if (patch.rerollSeed) room.mapSeed = randomLocalSeed();
 
     if (patch.roomMode) {
       room.roomMode = patch.roomMode;
       room.teamSize = patch.roomMode === 'rumble' ? (Math.max(2, Math.min(3, patch.teamSize ?? room.teamSize ?? 3)) as 2 | 3) : 1;
       if (!room.mapSeed) room.mapSeed = randomLocalSeed();
+      for (const sid of ALL_SLOTS) {
+        room.slots[sid].team = room.roomMode === 'beatemup' ? 1 : teamForSlot(sid);
+      }
     } else if (patch.teamSize !== undefined && room.roomMode === 'rumble') {
       room.teamSize = Math.max(2, Math.min(3, patch.teamSize)) as 2 | 3;
     }
@@ -1046,16 +1189,75 @@ export class NetworkClient {
 
     const room = this.currentRoom;
     if (!room || room.hostId !== this.getActorId()) return;
-    const roomMode: RoomMode = room.roomMode === 'rumble' ? 'rumble' : '1v1';
+    const roomMode: RoomMode =
+      room.roomMode === 'rumble'
+        ? 'rumble'
+        : room.roomMode === 'beatemup'
+          ? 'beatemup'
+          : '1v1';
     const slots = room.slots ?? {
       p1: { ...room.p1, slot: 'p1' as FighterSlotId, team: 1 as FighterTeam, slotMode: 'human' as SlotMode },
-      p2: { ...room.p2, slot: 'p2' as FighterSlotId, team: 2 as FighterTeam, slotMode: (room.p2.isBot ? 'bot' : 'human') as SlotMode },
+      p2: { ...room.p2, slot: 'p2' as FighterSlotId, team: (roomMode === 'beatemup' ? 1 : 2) as FighterTeam, slotMode: (room.p2.isBot ? 'bot' : 'human') as SlotMode },
       p3: buildLocalEmptySlot('p3'),
       p4: buildLocalEmptySlot('p4'),
       p5: buildLocalEmptySlot('p5'),
       p6: buildLocalEmptySlot('p6'),
     };
     const activeIds = getLocalActiveSlots(room);
+
+    if (roomMode === 'beatemup') {
+      if (slots.p2.slotMode === 'human' && slots.p2.userId && !slots.p2.ready) {
+        this.emit('roomError', `Aguarde ${slots.p2.username} clicar em "Pronto!" para iniciar.`);
+        return;
+      }
+
+      const players = activeIds
+        .map((sid) => slots[sid])
+        .filter((s) => s && s.slotMode !== 'closed' && (s.slotMode === 'bot' || Boolean(s.userId)))
+        .map((s) => ({
+          slot: (s.slot ?? 'p1') as 'p1' | 'p2',
+          userId: s.userId,
+          displayName: s.username,
+          charId: s.charId,
+          startPhase: s.startPhase,
+          level: s.level,
+          isBot: Boolean(s.isBot),
+        }));
+
+      if (players.length === 0) {
+        this.emit('roomError', 'É necessário pelo menos 1 herói para iniciar.');
+        return;
+      }
+
+      room.status = 'fighting';
+      const hostSlot = (findLocalUserSlot(room, room.hostId) ?? 'p1') as 'p1' | 'p2';
+      const hasRemoteHuman = players.some((p) => !p.isBot && p.userId !== room.hostId);
+      const p1Entry = players.find((p) => p.slot === hostSlot) ?? players[0];
+
+      const beuConfig: BeatEmUpConfig = {
+        charId: p1Entry.charId,
+        startPhase: p1Entry.startPhase,
+        level: p1Entry.level,
+        displayName: p1Entry.displayName,
+        stageId: room.beatEmUpStage ?? 'brasilia',
+        difficulty: room.botDifficulty,
+        mode: hasRemoteHuman ? 'online' : players.some((p) => p.isBot) ? 'room-bot' : 'solo',
+        localSlot: hostSlot,
+        hostSlot,
+        roomCode: room.code,
+        players,
+      };
+
+      if (hasRemoteHuman) {
+        this.broadcastLocal({
+          type: 'beu:start',
+          roomCode: room.code,
+          beatEmUpConfig: beuConfig,
+        });
+      }
+      this.emit('beatEmUpStart', beuConfig);
+      return;
+    }
 
     if (roomMode !== 'rumble' && room.p2Mode === 'human' && (!slots.p2.userId || !slots.p2.ready)) {
       this.emit('roomError', 'Aguarde seu amigo ficar pronto ou jogue contra Bot.');
@@ -1174,6 +1376,32 @@ export class NetworkClient {
     }
   }
 
+  public sendBeatEmUpSync(payload: BeatEmUpSyncPayload): void {
+    if (this.wsConnected) {
+      this.sendWs({ type: 'beu:sync', payload });
+    } else if (this.currentRoom) {
+      this.broadcastLocal({
+        type: 'beu:sync',
+        roomCode: this.currentRoom.code,
+        senderId: this.getActorId(),
+        payload,
+      });
+    }
+  }
+
+  public sendBeatEmUpEvent(payload: BeatEmUpEventPayload): void {
+    if (this.wsConnected) {
+      this.sendWs({ type: 'beu:event', payload });
+    } else if (this.currentRoom) {
+      this.broadcastLocal({
+        type: 'beu:event',
+        roomCode: this.currentRoom.code,
+        senderId: this.getActorId(),
+        payload,
+      });
+    }
+  }
+
   private setSession(token: string, user: UserProfile): void {
     this.token = token;
     this.user = user;
@@ -1273,6 +1501,13 @@ export class NetworkClient {
         break;
       }
 
+      case 'beu:start': {
+        if (msg.beatEmUpConfig) {
+          this.emit('beatEmUpStart', msg.beatEmUpConfig as BeatEmUpConfig);
+        }
+        break;
+      }
+
       case 'match:sync': {
         if (msg.payload) {
           this.emit('remoteSync', msg.payload as RemoteFighterSyncPayload);
@@ -1283,6 +1518,20 @@ export class NetworkClient {
       case 'match:event': {
         if (msg.payload) {
           this.emit('remoteEvent', msg.payload as CombatEventPayload);
+        }
+        break;
+      }
+
+      case 'beu:sync': {
+        if (msg.payload) {
+          this.emit('beuSync', msg.payload as BeatEmUpSyncPayload);
+        }
+        break;
+      }
+
+      case 'beu:event': {
+        if (msg.payload) {
+          this.emit('beuEvent', msg.payload as BeatEmUpEventPayload);
         }
         break;
       }
@@ -1439,6 +1688,22 @@ export class NetworkClient {
           localSlot: myParticipant?.slot ?? 'p2',
         });
       } else if (
+        msg.type === 'beu:start' &&
+        this.currentRoom &&
+        this.currentRoom.code === msg.roomCode &&
+        this.currentRoom.hostId !== this.getActorId()
+      ) {
+        const cfg = msg.beatEmUpConfig as BeatEmUpConfig;
+        const myParticipant = cfg.players?.find((p) => p.userId === this.getActorId());
+        this.emit('beatEmUpStart', {
+          ...cfg,
+          charId: myParticipant?.charId ?? cfg.charId,
+          startPhase: myParticipant?.startPhase ?? cfg.startPhase,
+          level: myParticipant?.level ?? cfg.level,
+          displayName: myParticipant?.displayName ?? cfg.displayName,
+          localSlot: myParticipant?.slot ?? 'p2',
+        });
+      } else if (
         msg.type === 'match:sync' &&
         this.currentRoom &&
         this.currentRoom.code === msg.roomCode &&
@@ -1452,6 +1717,20 @@ export class NetworkClient {
         msg.senderId !== this.getActorId()
       ) {
         this.emit('remoteEvent', msg.payload as CombatEventPayload);
+      } else if (
+        msg.type === 'beu:sync' &&
+        this.currentRoom &&
+        this.currentRoom.code === msg.roomCode &&
+        msg.senderId !== this.getActorId()
+      ) {
+        this.emit('beuSync', msg.payload as BeatEmUpSyncPayload);
+      } else if (
+        msg.type === 'beu:event' &&
+        this.currentRoom &&
+        this.currentRoom.code === msg.roomCode &&
+        msg.senderId !== this.getActorId()
+      ) {
+        this.emit('beuEvent', msg.payload as BeatEmUpEventPayload);
       }
     });
   }

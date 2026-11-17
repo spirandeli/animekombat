@@ -244,15 +244,36 @@ export class SpriteLoader {
   }
 
   public async preloadBeatEmUpStage(
-    heroCharId: string,
-    heroStartPhase: number,
-    entityIds: string[],
-    onProgress?: (percent: number) => void
+    heroesOrCharId: string | Array<{ charId: string; startPhase: number }>,
+    heroStartPhaseOrEntities: number | string[],
+    entityIdsOrProgress?: string[] | ((percent: number) => void),
+    maybeOnProgress?: (percent: number) => void
   ): Promise<void> {
-    const heroKey = `${heroCharId}:${this.getPhaseKey(heroStartPhase)}`;
-    this.unloadUnused(new Set([heroKey]));
+    const heroRequests: Array<{ charId: string; startPhase: number }> =
+      typeof heroesOrCharId === 'string'
+        ? [{ charId: heroesOrCharId, startPhase: Number(heroStartPhaseOrEntities) || 1 }]
+        : heroesOrCharId;
 
-    const totalTasks = 1 + entityIds.length;
+    const entityIds: string[] = Array.isArray(heroStartPhaseOrEntities)
+      ? heroStartPhaseOrEntities
+      : Array.isArray(entityIdsOrProgress)
+        ? entityIdsOrProgress
+        : [];
+
+    const onProgress: ((percent: number) => void) | undefined =
+      typeof entityIdsOrProgress === 'function' ? entityIdsOrProgress : maybeOnProgress;
+
+    const uniqueHeroMap = new Map<string, { charId: string; startPhase: number }>();
+    for (const h of heroRequests) {
+      const key = `${h.charId}:${this.getPhaseKey(h.startPhase)}`;
+      if (!uniqueHeroMap.has(key)) {
+        uniqueHeroMap.set(key, { charId: h.charId, startPhase: h.startPhase });
+      }
+    }
+    const uniqueHeroes = [...uniqueHeroMap.values()];
+    this.unloadUnused(new Set(uniqueHeroMap.keys()));
+
+    const totalTasks = uniqueHeroes.length + entityIds.length;
     const prog = new Array<number>(totalTasks).fill(0);
     const tot = new Array<number>(totalTasks).fill(1);
     const emit = () => {
@@ -266,15 +287,17 @@ export class SpriteLoader {
     };
 
     await Promise.all([
-      this.loadPhasePack(heroCharId, heroStartPhase, (l, total) => {
-        prog[0] = l;
-        tot[0] = Math.max(1, total);
-        emit();
-      }),
+      ...uniqueHeroes.map((h, idx) =>
+        this.loadPhasePack(h.charId, h.startPhase, (l, total) => {
+          prog[idx] = l;
+          tot[idx] = Math.max(1, total);
+          emit();
+        })
+      ),
       ...entityIds.map((eid, idx) =>
         this.loadBeatEmUpPack(eid, (l, total) => {
-          prog[idx + 1] = l;
-          tot[idx + 1] = Math.max(1, total);
+          prog[uniqueHeroes.length + idx] = l;
+          tot[uniqueHeroes.length + idx] = Math.max(1, total);
           emit();
         })
       ),

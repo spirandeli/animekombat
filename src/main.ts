@@ -40,7 +40,9 @@ async function bootstrap(): Promise<void> {
   const arena = new ArenaScene(canvas, spriteLoader, input, virtualControls, audio);
   arena.setNetworkClient(net);
   const beatEmUp = new BeatEmUpScene(canvas, spriteLoader, input, virtualControls, audio);
+  beatEmUp.setNetworkClient(net);
   const isAnySceneActive = () => arena.isActive() || beatEmUp.isActive();
+  const isAnyOnlineMatch = () => arena.isOnlineMatch() || beatEmUp.isOnlineMatch();
 
   const applySettings = () => {
     const s = save.getData().settings;
@@ -61,7 +63,7 @@ async function bootstrap(): Promise<void> {
 
   const syncPauseState = () => {
     const pausePhysics =
-      !arena.isOnlineMatch() && (manualPause || orientationPause);
+      !isAnyOnlineMatch() && (manualPause || orientationPause);
     loop.setPaused(pausePhysics);
   };
 
@@ -103,7 +105,7 @@ async function bootstrap(): Promise<void> {
         input.resetAll();
         virtualControls.resetTouchState();
       }
-      if (hidden && isAnySceneActive() && !arena.isOnlineMatch()) {
+      if (hidden && isAnySceneActive() && !isAnyOnlineMatch()) {
         manualPause = true;
         menus.openPause();
         syncPauseState();
@@ -173,7 +175,7 @@ async function bootstrap(): Promise<void> {
     activeSceneKind = 'beatemup';
     lastBeatEmUpConfig = config;
     manualPause = false;
-    menus.setActiveMatchMode('solo');
+    menus.setActiveMatchMode(config.mode ?? 'solo');
     menus.showLoading(0);
 
     const stage = getBeatEmUpStage(config.stageId);
@@ -185,11 +187,14 @@ async function bootstrap(): Promise<void> {
         stage.bossId,
       ])
     );
+    const heroRequests =
+      config.players && config.players.length > 0
+        ? config.players.map((p) => ({ charId: p.charId, startPhase: p.startPhase }))
+        : [{ charId: config.charId, startPhase: config.startPhase }];
 
     await Promise.all([
       spriteLoader.preloadBeatEmUpStage(
-        config.charId,
-        config.startPhase,
+        heroRequests,
         entityIds,
         (pct) => menus.showLoading(pct)
       ),
@@ -222,17 +227,17 @@ async function bootstrap(): Promise<void> {
     onQuitToSelect: () => {
       manualPause = false;
       const wasBeatEmUp = activeSceneKind === 'beatemup';
-      const wasInRoom =
-        !wasBeatEmUp &&
-        (lastConfig?.mode === 'online' || lastConfig?.mode === 'room-bot');
+      const wasInRoom = wasBeatEmUp
+        ? (lastBeatEmUpConfig?.mode === 'online' || lastBeatEmUpConfig?.mode === 'room-bot')
+        : (lastConfig?.mode === 'online' || lastConfig?.mode === 'room-bot');
       arena.stopMatch();
       beatEmUp.stopMatch();
       pwa.setInCombat(false);
       orientationGuard.setCombatActive(false);
-      if (wasBeatEmUp) {
-        menus.showBeatEmUpSelect();
-      } else if (wasInRoom) {
+      if (wasInRoom) {
         menus.showRooms();
+      } else if (wasBeatEmUp) {
+        menus.showBeatEmUpSelect();
       } else {
         menus.showSelect();
       }
@@ -254,17 +259,39 @@ async function bootstrap(): Promise<void> {
   net.on('matchStart', (config) => {
     void startMatchFlow(config);
   });
+  net.on('beatEmUpStart', (config) => {
+    void startBeatEmUpFlow(config);
+  });
   net.on('remoteSync', (payload) => {
     arena.applyRemoteSync(payload);
   });
   net.on('remoteEvent', (ev) => {
     arena.applyRemoteEvent(ev);
   });
+  net.on('beuSync', (payload) => {
+    beatEmUp.applyRemoteSync(payload);
+  });
+  net.on('beuEvent', (ev) => {
+    beatEmUp.applyRemoteEvent(ev);
+  });
   net.on('opponentLeft', () => {
-    arena.handleOpponentLeft();
+    if (beatEmUp.isActive()) {
+      manualPause = false;
+      beatEmUp.stopMatch();
+      pwa.setInCombat(false);
+      orientationGuard.setCombatActive(false);
+      menus.showLobby();
+      syncPauseState();
+    } else {
+      arena.handleOpponentLeft();
+    }
   });
   net.on('playerLeft', ({ slot, username }) => {
-    arena.handlePlayerLeft(slot, username);
+    if (beatEmUp.isActive()) {
+      beatEmUp.handlePlayerLeft(slot, username);
+    } else {
+      arena.handlePlayerLeft(slot, username);
+    }
   });
 
   input.setOnGamepadChange(() => {
@@ -312,8 +339,10 @@ async function bootstrap(): Promise<void> {
       if (!beatEmUp.isActive()) return;
       input.resetAll();
       virtualControls.resetTouchState();
-      manualPause = true;
-      syncPauseState();
+      if (!beatEmUp.isOnlineMatch()) {
+        manualPause = true;
+        syncPauseState();
+      }
       menus.openPause();
     },
     (report) => {
@@ -325,6 +354,9 @@ async function bootstrap(): Promise<void> {
         report.xpEarned
       );
       void net.syncProgress();
+      if (report.mode !== 'solo' || net.getCurrentRoom()) {
+        net.notifyMatchEnded();
+      }
       menus.showBeatEmUpResult(report, xpSummary);
     }
   );

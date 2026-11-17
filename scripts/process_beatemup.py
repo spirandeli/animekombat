@@ -4,6 +4,7 @@
 Reads:
   - spritesPersonagens/expandidos/npcs/*.zip
   - spritesPersonagens/expandidos/bosses/*.zip
+  - spritesPersonagens/expandidos/new_bosses/*.zip
 
 Outputs WebP frames and manifest to:
   - public/assets/beatemup/<entity_id>/fase_1/...
@@ -129,6 +130,60 @@ BOSS_METADATA: dict[str, dict[str, Any]] = {
     },
 }
 
+BOSS_METADATA.update({
+    "boss_nikolas_ferreira": {
+        "name": "Dep. Nikolas Ferreira",
+        "title": "CHEFÃO DO MINEIRÃO",
+        "stageId": "belo-horizonte",
+        "kind": "boss",
+        "maxHp": 2550,
+        "speed": 195,
+        "damageScale": 1.0,
+        "auraColor": "#FFC542",
+        "scoreValue": 2000,
+        "moves": {
+            "ataque_1": "Trinca da Serra",
+            "ataque_2": "Investida de Quartzo",
+            "ataque_3": "Eco da Tribuna",
+            "ataque_4": "Horizonte Dourado"
+        }
+    },
+    "boss_pablo_marcal": {
+        "name": "Pablo Marçal",
+        "title": "CHEFÃO DO IPIRANGA",
+        "stageId": "sao-paulo",
+        "kind": "boss",
+        "maxHp": 2450,
+        "speed": 215,
+        "damageScale": 0.98,
+        "auraColor": "#00D9FF",
+        "scoreValue": 2000,
+        "moves": {
+            "ataque_1": "Pulso Paulista",
+            "ataque_2": "Arrancada da Avenida",
+            "ataque_3": "Seta de Impulso",
+            "ataque_4": "Pico da Paulista"
+        }
+    },
+    "boss_sergio_moro": {
+        "name": "Sérgio Moro",
+        "title": "CHEFÃO DO JARDIM BOTÂNICO",
+        "stageId": "curitiba",
+        "kind": "boss",
+        "maxHp": 2750,
+        "speed": 175,
+        "damageScale": 1.05,
+        "auraColor": "#62E6AA",
+        "scoreValue": 2100,
+        "moves": {
+            "ataque_1": "Tríplice Selo",
+            "ataque_2": "Muralha de Jade",
+            "ataque_3": "Selo de Curitiba",
+            "ataque_4": "Círculo das Araucárias"
+        }
+    }
+})
+
 HIP_ANCHOR_ACTIONS = {"run", "dash"}
 CORE_HIP_ANCHOR_ACTIONS = {"ataque_4"}
 BODY_CENTROID_ANCHOR_ACTIONS = {"knockdown", "getup", "ko_defeat"}
@@ -239,7 +294,7 @@ def _count_visible_pixels(rgba: Image.Image) -> int:
 def collect_tasks() -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     sources: list[Path] = []
-    for sub in ("npcs", "bosses"):
+    for sub in ("npcs", "bosses", "new_bosses"):
         d = EXP_DIR / sub
         if d.exists():
             sources.extend(sorted(d.glob("*.zip")))
@@ -397,13 +452,19 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 4))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--entities", nargs="+", help="Process only these IDs, preserving other manifest entries")
     args = parser.parse_args()
 
     if not args.dry_run and not args.apply:
         parser.error("Specify --dry-run or --apply")
 
     tasks = collect_tasks()
-    print(f"Collected {len(tasks)} Beat 'em Up sheets across npcs/ and bosses/")
+    if args.entities:
+        tasks = [t for t in tasks if t["entity_id"] in args.entities]
+        missing = set(args.entities) - {t["entity_id"] for t in tasks}
+        if missing:
+            parser.error(f"Entities without source sheets: {sorted(missing)}")
+    print(f"Collected {len(tasks)} Beat 'em Up sheets across npcs/, bosses/ and new_bosses/")
     if args.dry_run:
         by_ent = defaultdict(int)
         for t in tasks:
@@ -426,6 +487,10 @@ def main() -> int:
 
     npcs: dict[str, Any] = {}
     bosses: dict[str, Any] = {}
+    if args.entities and MANIFEST_PATH.exists():
+        previous = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        npcs.update(previous["npcs"])
+        bosses.update(previous["bosses"])
 
     for eid in sorted(grouped):
         acts = {k: grouped[eid]["actions"][k] for k in sorted(grouped[eid]["actions"])}

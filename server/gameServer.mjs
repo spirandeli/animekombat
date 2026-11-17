@@ -167,7 +167,10 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
     'sunset_harbor',
   ]);
 
-  function teamForSlot(slotId) {
+  const VALID_BEU_STAGES = new Set(['brasilia', 'pelourinho', 'rio-de-janeiro', 'belo-horizonte', 'sao-paulo', 'curitiba']);
+
+  function teamForSlot(slotId, roomMode = '1v1') {
+    if (roomMode === 'beatemup') return 1;
     return slotId === 'p1' || slotId === 'p3' || slotId === 'p5' ? 1 : 2;
   }
 
@@ -180,6 +183,17 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
     return VALID_ARENA_THEMES.has(t) ? t : 'random';
   }
 
+  function normalizeRoomMode(mode) {
+    if (mode === 'rumble') return 'rumble';
+    if (mode === 'beatemup') return 'beatemup';
+    return '1v1';
+  }
+
+  function normalizeBeuStage(stage) {
+    const s = typeof stage === 'string' ? stage : 'brasilia';
+    return VALID_BEU_STAGES.has(s) ? s : 'brasilia';
+  }
+
   function clampTeamSize(roomMode, size) {
     if (roomMode !== 'rumble') return 1;
     const n = Number(size) || 3;
@@ -187,6 +201,7 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
   }
 
   function getActiveSlotIds(room) {
+    if (room.roomMode === 'beatemup') return ['p1', 'p2'];
     const size = clampTeamSize(room.roomMode, room.teamSize);
     return ALL_SLOTS.slice(0, size * 2);
   }
@@ -225,14 +240,16 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
     for (const slotId of ALL_SLOTS) {
       slots[slotId] = { ...room.slots[slotId] };
     }
+    const roomMode = normalizeRoomMode(room.roomMode);
     return {
       code: room.code,
       isPublic: Boolean(room.isPublic),
       hostId: room.hostId,
-      roomMode: room.roomMode === 'rumble' ? 'rumble' : '1v1',
-      teamSize: clampTeamSize(room.roomMode, room.teamSize),
+      roomMode,
+      teamSize: clampTeamSize(roomMode, room.teamSize),
       mapSeed: Number(room.mapSeed) || 1337,
       mapTheme: normalizeThemeId(room.mapTheme),
+      beatEmUpStage: normalizeBeuStage(room.beatEmUpStage),
       p2Mode: room.p2Mode,
       botDifficulty: room.botDifficulty,
       status: room.status,
@@ -301,14 +318,16 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
 
       const hostSlot = room.slots[findUserSlotKey(room, room.hostId) || 'p1'];
 
+      const rm = normalizeRoomMode(room.roomMode);
       list.push({
         code: room.code,
         hostName: hostSlot.username,
         hostFriendCode: hostSlot.friendCode,
         isFriend: isFriendHost,
-        roomMode: room.roomMode === 'rumble' ? 'rumble' : '1v1',
-        teamSize: clampTeamSize(room.roomMode, room.teamSize),
+        roomMode: rm,
+        teamSize: clampTeamSize(rm, room.teamSize),
         mapTheme: normalizeThemeId(room.mapTheme),
+        beatEmUpStage: normalizeBeuStage(room.beatEmUpStage),
         occupiedCount,
         humanCount,
         botCount,
@@ -426,6 +445,42 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
 
     if (remainingHumans.length === 0) {
       rooms.delete(roomCode);
+    } else if (room.roomMode === 'beatemup') {
+      if (wasFighting && !wasHost) {
+        syncLegacySlots(room);
+        for (const uid of getRoomHumanUserIds(room)) {
+          sendToUser(uid, {
+            type: 'match:player_left',
+            slot: slotKey,
+            username: leavingUsername,
+          });
+        }
+        broadcastRoomState(room);
+      } else {
+        const survivorKey = remainingHumans[0];
+        if (survivorKey !== 'p1') {
+          room.slots.p1 = {
+            ...room.slots[survivorKey],
+            slot: 'p1',
+            team: 1,
+            ready: true,
+          };
+          room.slots[survivorKey] = buildEmptyHumanSlot(survivorKey);
+          room.slots[survivorKey].team = 1;
+        } else {
+          room.slots.p1.ready = true;
+        }
+        room.hostId = room.slots.p1.userId;
+        room.status = 'lobby';
+        syncLegacySlots(room);
+        if (wasFighting) {
+          sendToUser(room.hostId, {
+            type: 'match:opponent_left',
+            message: 'O anfitrião saiu da partida Beat em Up. Você voltou ao lobby.',
+          });
+        }
+        broadcastRoomState(room);
+      }
     } else if (room.roomMode !== 'rumble') {
       // 1v1 classic: promote remaining player to p1 and return to lobby
       const survivorKey = remainingHumans[0];
@@ -955,15 +1010,16 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
         case 'room:create': {
           leaveCurrentRoom(ctx, true);
           const code = generateRoomCode(rooms);
-          const roomMode = msg.roomMode === 'rumble' ? 'rumble' : '1v1';
+          const roomMode = normalizeRoomMode(msg.roomMode);
           const teamSize = clampTeamSize(roomMode, msg.teamSize ?? (roomMode === 'rumble' ? 3 : 1));
-          const p2Mode = msg.p2Mode === 'bot' ? 'bot' : 'human';
+          const p2Mode = msg.p2Mode === 'bot' ? 'bot' : msg.p2Mode === 'closed' ? 'closed' : 'human';
           const botDifficulty = ['easy', 'medium', 'master'].includes(msg.botDifficulty)
             ? msg.botDifficulty
             : 'medium';
           const isPublic = msg.isPublic !== false;
           const mapSeed = msg.mapSeed ? (Number(msg.mapSeed) >>> 0) || randomMapSeed() : randomMapSeed();
           const mapTheme = normalizeThemeId(msg.mapTheme);
+          const beatEmUpStage = normalizeBeuStage(msg.beatEmUpStage);
           const p1CharId = String(msg.charId || 'goku');
           const p1StartPhase = clampPhase(msg.startPhase || 1);
           const p1Level = clampLevel(msg.level || 1);
@@ -976,6 +1032,7 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
             { ...ctx, charId: p1CharId, startPhase: p1StartPhase, level: p1Level },
             true
           );
+          slots.p1.team = teamForSlot('p1', roomMode);
 
           for (const sid of ALL_SLOTS.slice(1)) {
             if (roomMode === 'rumble') {
@@ -990,12 +1047,21 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
               } else {
                 slots[sid] = buildEmptyHumanSlot(sid);
               }
+            } else if (roomMode === 'beatemup') {
+              if (sid === 'p2' && p2Mode === 'bot') {
+                slots[sid] = buildBotSlot('p2', botDifficulty, botCharId, p1StartPhase, p1Level);
+              } else if (sid === 'p2' && p2Mode === 'closed') {
+                slots[sid] = buildClosedSlot('p2');
+              } else {
+                slots[sid] = buildEmptyHumanSlot(sid);
+              }
             } else {
               slots[sid] =
                 sid === 'p2' && p2Mode === 'bot'
                   ? buildBotSlot('p2', botDifficulty, botCharId, p1StartPhase, p1Level)
                   : buildEmptyHumanSlot(sid);
             }
+            slots[sid].team = teamForSlot(sid, roomMode);
           }
 
           const room = {
@@ -1006,6 +1072,7 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
             teamSize,
             mapSeed,
             mapTheme,
+            beatEmUpStage,
             p2Mode: slots.p2.slotMode === 'bot' ? 'bot' : 'human',
             botDifficulty,
             status: 'lobby',
@@ -1087,6 +1154,7 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
             },
             false
           );
+          room.slots[chosenSlot].team = teamForSlot(chosenSlot, room.roomMode);
           ctx.roomCode = room.code;
           syncLegacySlots(room);
 
@@ -1138,37 +1206,49 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
           if (msg.mapTheme !== undefined) {
             room.mapTheme = normalizeThemeId(msg.mapTheme);
           }
+          if (msg.beatEmUpStage !== undefined) {
+            room.beatEmUpStage = normalizeBeuStage(msg.beatEmUpStage);
+          }
           if (msg.rerollSeed) {
             room.mapSeed = randomMapSeed();
           }
 
-          if (msg.roomMode === '1v1' || msg.roomMode === 'rumble') {
+          if (msg.roomMode === '1v1' || msg.roomMode === 'rumble' || msg.roomMode === 'beatemup') {
             if (msg.roomMode !== room.roomMode) {
               room.roomMode = msg.roomMode;
-              if (room.roomMode === '1v1') {
+              if (room.roomMode === '1v1' || room.roomMode === 'beatemup') {
                 room.teamSize = 1;
-                // Keep host in p1 and at most 1 other human in p2
+                const modeLabel = room.roomMode === 'beatemup' ? 'Beat em Up Co-op' : '1v1 Clássico';
                 const humanEntries = ALL_SLOTS
                   .map((sid) => room.slots[sid])
                   .filter((s) => s.slotMode === 'human' && s.userId && !s.isBot);
                 const hostEntry = humanEntries.find((s) => s.userId === room.hostId) || room.slots[hostSlotKey];
                 const others = humanEntries.filter((s) => s.userId !== room.hostId);
                 for (let i = 1; i < others.length; i += 1) {
-                  kickUserInSlot(others[i].slot, 'A sala mudou para o modo 1v1 Clássico.');
+                  kickUserInSlot(others[i].slot, `A sala mudou para o modo ${modeLabel}.`);
                 }
                 room.slots.p1 = { ...hostEntry, slot: 'p1', team: 1, ready: true };
+                const p2Team = teamForSlot('p2', room.roomMode);
                 if (others[0]) {
-                  room.slots.p2 = { ...others[0], slot: 'p2', team: 2 };
+                  room.slots.p2 = { ...others[0], slot: 'p2', team: p2Team };
                 } else if (room.slots.p2.slotMode === 'bot') {
                   room.slots.p2 = buildBotSlot('p2', room.botDifficulty, room.slots.p2.charId, room.slots.p2.startPhase, hostLevel);
+                  room.slots.p2.team = p2Team;
+                } else if (room.slots.p2.slotMode === 'closed' && room.roomMode === 'beatemup') {
+                  room.slots.p2 = buildClosedSlot('p2');
+                  room.slots.p2.team = p2Team;
                 } else {
                   room.slots.p2 = buildEmptyHumanSlot('p2');
+                  room.slots.p2.team = p2Team;
                 }
                 for (const extraSid of ALL_SLOTS.slice(2)) {
                   room.slots[extraSid] = buildEmptyHumanSlot(extraSid);
                 }
               } else {
                 room.teamSize = clampTeamSize('rumble', msg.teamSize ?? 3);
+                for (const sid of ALL_SLOTS) {
+                  room.slots[sid].team = teamForSlot(sid, 'rumble');
+                }
                 if (!room.mapSeed) room.mapSeed = randomMapSeed();
               }
             }
@@ -1237,13 +1317,16 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
                   msg.botStartPhase ?? cur.startPhase,
                   hostLevel
                 );
+                room.slots[ts].team = teamForSlot(ts, room.roomMode);
               } else if (msg.slotMode === 'human') {
                 if (cur.slotMode !== 'human') {
                   room.slots[ts] = buildEmptyHumanSlot(ts, cur.charId);
+                  room.slots[ts].team = teamForSlot(ts, room.roomMode);
                 }
-              } else if (msg.slotMode === 'closed' && room.roomMode === 'rumble') {
+              } else if (msg.slotMode === 'closed' && (room.roomMode === 'rumble' || room.roomMode === 'beatemup')) {
                 kickUserInSlot(ts, 'O anfitrião fechou esta vaga.');
                 room.slots[ts] = buildClosedSlot(ts);
+                room.slots[ts].team = teamForSlot(ts, room.roomMode);
               }
             }
           } else if (msg.p2Mode === 'bot') {
@@ -1417,6 +1500,85 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
 
           const activeIds = getActiveSlotIds(room);
 
+          if (room.roomMode === 'beatemup') {
+            if (room.slots.p2.slotMode === 'human' && room.slots.p2.userId && !room.slots.p2.ready) {
+              sendWs(ws, {
+                type: 'room:error',
+                message: `Aguarde ${room.slots.p2.username} clicar em "Pronto!" para iniciar.`,
+              });
+              return;
+            }
+
+            const participants = [];
+            for (const sid of activeIds) {
+              const s = room.slots[sid];
+              if (!s || s.slotMode === 'closed') continue;
+              if (s.slotMode === 'human' && !s.userId) continue;
+              participants.push({
+                slot: sid,
+                team: 1,
+                userId: s.userId,
+                displayName: s.username,
+                charId: s.charId,
+                startPhase: s.startPhase,
+                level: s.level,
+                isBot: Boolean(s.isBot),
+              });
+            }
+
+            if (participants.length === 0) {
+              sendWs(ws, {
+                type: 'room:error',
+                message: 'É necessário pelo menos 1 herói para iniciar.',
+              });
+              return;
+            }
+
+            room.status = 'fighting';
+            syncLegacySlots(room);
+
+            const humanCount = participants.filter((p) => !p.isBot && p.userId).length;
+            const mode = humanCount > 1 ? 'online' : participants.some((p) => p.isBot) ? 'room-bot' : 'solo';
+            const hostSlot = findUserSlotKey(room, room.hostId) || 'p1';
+            const p1Entry = participants.find((p) => p.slot === hostSlot) || participants[0];
+
+            const baseBeuConfig = {
+              charId: p1Entry.charId,
+              startPhase: p1Entry.startPhase,
+              level: p1Entry.level,
+              displayName: p1Entry.displayName,
+              stageId: normalizeBeuStage(room.beatEmUpStage),
+              difficulty: room.botDifficulty,
+              mode,
+              roomCode: room.code,
+              hostSlot,
+              players: participants,
+            };
+
+            for (const sid of activeIds) {
+              const s = room.slots[sid];
+              if (s.slotMode === 'human' && s.userId && !s.isBot) {
+                const myParticipant = participants.find((p) => p.slot === sid) || p1Entry;
+                sendToUser(s.userId, {
+                  type: 'beu:start',
+                  beatEmUpConfig: {
+                    ...baseBeuConfig,
+                    charId: myParticipant.charId,
+                    startPhase: myParticipant.startPhase,
+                    level: myParticipant.level,
+                    displayName: myParticipant.displayName,
+                    localSlot: sid,
+                  },
+                });
+                notifyFriendsOfUser(s.userId);
+              }
+            }
+
+            broadcastRoomState(room);
+            broadcastRoomsList();
+            break;
+          }
+
           if (room.roomMode !== 'rumble') {
             if (room.slots.p2.slotMode === 'human') {
               if (!room.slots.p2.userId) {
@@ -1555,6 +1717,34 @@ export function attachGameServer(middlewares, httpServer, options = {}) {
             if (uid === ctx.userId) continue;
             sendToUser(uid, {
               type: 'match:event',
+              payload: msg.payload,
+            });
+          }
+          break;
+        }
+
+        case 'beu:sync': {
+          if (!ctx.roomCode) return;
+          const room = rooms.get(ctx.roomCode);
+          if (!room || room.status !== 'fighting') return;
+          for (const uid of getRoomHumanUserIds(room)) {
+            if (uid === ctx.userId) continue;
+            sendToUser(uid, {
+              type: 'beu:sync',
+              payload: msg.payload,
+            });
+          }
+          break;
+        }
+
+        case 'beu:event': {
+          if (!ctx.roomCode) return;
+          const room = rooms.get(ctx.roomCode);
+          if (!room) return;
+          for (const uid of getRoomHumanUserIds(room)) {
+            if (uid === ctx.userId) continue;
+            sendToUser(uid, {
+              type: 'beu:event',
               payload: msg.payload,
             });
           }

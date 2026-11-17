@@ -9,7 +9,7 @@ import { CharactersManifest, SpriteLoader } from '../engine/SpriteLoader';
 import { AIDifficulty } from '../game/AIController';
 import { ARENA_THEMES, getArenaThemeInfo } from '../game/ArenaMap';
 import { MatchConfig, MatchEndReport } from '../game/ArenaScene';
-import { BEAT_EM_UP_STAGES, BeatEmUpStageId } from '../game/BeatEmUpMap';
+import { BEAT_EM_UP_STAGES, BeatEmUpStageId, getBeatEmUpStage } from '../game/BeatEmUpMap';
 import { BeatEmUpConfig, BeatEmUpEndReport } from '../game/BeatEmUpScene';
 import {
   FighterSlotId,
@@ -1167,7 +1167,7 @@ export class Menus {
 
             <div class="ak-arcade-center">
               <div class="ak-map-preview">
-                <img class="ak-map-preview-img" src="${stage.segmentSrcs[2]}" alt="${escapeHtml(stage.name)}" />
+                <img class="ak-map-preview-img" src="${stage.segmentSrcs[stage.segmentSrcs.length - 1]}" alt="${escapeHtml(stage.name)}" />
                 <div class="ak-map-preview-overlay">
                   <div class="ak-map-preview-title">${escapeHtml(stage.name)}</div>
                   <div class="ak-map-preview-sub">${escapeHtml(stage.subtitle)}</div>
@@ -1176,9 +1176,12 @@ export class Menus {
 
               <div class="ak-map-grid">${stageCards}</div>
 
-              <div class="ak-arcade-center-footer">
-                <button id="btn-start-beatemup" class="ak-btn ak-btn-accent" type="button" style="min-width:240px;">
-                  Entrar nas Ruas! →
+              <div class="ak-arcade-center-footer" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+                <button id="btn-start-beatemup" class="ak-btn ak-btn-accent" type="button" style="min-width:210px;">
+                  Entrar Solo! →
+                </button>
+                <button id="btn-go-beu-coop" class="ak-btn ak-btn-cyan" type="button" style="min-width:210px;">
+                  👥 Co-op (até 2P)
                 </button>
               </div>
             </div>
@@ -1191,7 +1194,7 @@ export class Menus {
                 <div class="ak-pedestal-base cpu"></div>
               </div>
               <div class="ak-pedestal-name">${escapeHtml(stage.bossName)}</div>
-              <div class="ak-pedestal-form">3 Trechos · 5 Ondas + Chefão</div>
+              <div class="ak-pedestal-form">${stage.segmentSrcs.length} Trechos · ${stage.waves.length - 1} Ondas + Chefão</div>
             </div>
           </div>
         </div>
@@ -1231,6 +1234,7 @@ export class Menus {
   }
 
   private getActiveSlots(room: RoomState): FighterSlotId[] {
+    if (room.roomMode === 'beatemup') return ['p1', 'p2'];
     const all: FighterSlotId[] = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'];
     const size =
       room.roomMode === 'rumble'
@@ -1253,12 +1257,32 @@ export class Menus {
     return room.p1.userId === actorId ? 'p1' : room.p2.userId === actorId ? 'p2' : null;
   }
 
+  private renderBeuStagePillsHtml(attrName: string, selectedStage: BeatEmUpStageId): string {
+    return `
+      <div class="ak-theme-pills">
+        ${BEAT_EM_UP_STAGES.map(
+          (st) => `
+          <button
+            type="button"
+            class="ak-theme-pill ${selectedStage === st.id ? 'active' : ''}"
+            ${attrName}="${st.id}"
+            style="--pill-accent:${st.accentColor};"
+          >
+            ${escapeHtml(st.name)}
+          </button>`
+        ).join('')}
+      </div>
+    `;
+  }
+
   private renderRoomsScreen(): string {
     const openRooms = this.net.getOpenRooms();
     const isOnline = this.net.isOnline();
     const pendingCount = this.net.getFriendsOverview().incomingRequests.length;
-    const modeLabel =
-      this.createRoomMode === 'rumble'
+    const isCreateBeu = this.createRoomMode === 'beatemup';
+    const modeLabel = isCreateBeu
+      ? 'Beat em Up Co-op'
+      : this.createRoomMode === 'rumble'
         ? `Rumble ${this.createTeamSize}v${this.createTeamSize}`
         : '1v1';
 
@@ -1269,20 +1293,28 @@ export class Menus {
             .map((r) => {
               const charName = this.manifest.characters[r.p1CharId]?.name ?? r.p1CharId;
               const isRumble = r.roomMode === 'rumble';
+              const isBeu = r.roomMode === 'beatemup';
               const maxP = r.maxPlayers ?? (isRumble ? (r.teamSize ?? 3) * 2 : 2);
               const occ = r.occupiedCount ?? (r.hasFreeSlot ? 1 : maxP);
-              const themeLabel =
-                r.mapTheme && r.mapTheme !== 'random'
+              const themeLabel = isBeu
+                ? ` · ${getBeatEmUpStage(r.beatEmUpStage).name}`
+                : r.mapTheme && r.mapTheme !== 'random'
                   ? ` · ${getArenaThemeInfo(r.mapTheme).name}`
                   : '';
+              const badgeCls = isBeu ? 'green' : isRumble ? 'amber' : 'cyan';
+              const badgeText = isBeu
+                ? "BEAT 'EM UP CO-OP"
+                : isRumble
+                  ? `RUMBLE ${r.teamSize ?? 3}v${r.teamSize ?? 3}`
+                  : '1v1';
               return `
                 <div class="ak-list-row">
                   <div>
                     <div style="font-weight:800;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                       <span>#${escapeHtml(r.code)}</span>
                       <span>${escapeHtml(r.hostName)}</span>
-                      <span class="ak-mini-badge ${isRumble ? 'amber' : 'cyan'}">
-                        ${isRumble ? `RUMBLE ${r.teamSize ?? 3}v${r.teamSize ?? 3}` : '1v1'}
+                      <span class="ak-mini-badge ${badgeCls}">
+                        ${badgeText}
                       </span>
                       <span class="ak-mini-badge ${r.isPublic ? 'green' : ''}">
                         ${r.isPublic ? 'PÚBLICA' : 'PRIVADA'}
@@ -1290,7 +1322,7 @@ export class Menus {
                       ${r.isFriend ? '<span class="ak-mini-badge cyan">Amigo</span>' : ''}
                     </div>
                     <div class="ak-profile-sub">
-                      ${escapeHtml(charName)} (F${r.p1Phase}) · ${occ}/${maxP} lutadores${escapeHtml(themeLabel)} · ${r.hasFreeSlot ? `${r.openHumanSlots ?? 1} vaga(s) aberta(s)` : 'Completa'}
+                      ${escapeHtml(charName)} (F${r.p1Phase}) · ${occ}/${maxP} ${isBeu ? 'heróis' : 'lutadores'}${escapeHtml(themeLabel)} · ${r.hasFreeSlot ? `${r.openHumanSlots ?? 1} vaga(s) aberta(s)` : 'Completa'}
                     </div>
                   </div>
                   <button
@@ -1323,7 +1355,7 @@ export class Menus {
           ${
             !isOnline
               ? `<div class="ak-alert-warn" style="margin-top:10px;">
-                  Sem conexão com o servidor multiplayer. Você ainda pode criar uma <strong>Sala vs Bot / Rumble offline</strong>!
+                  Sem conexão com o servidor multiplayer. Você ainda pode criar uma <strong>Sala vs Bot / Co-op offline</strong>!
                 </div>`
               : ''
           }
@@ -1347,6 +1379,9 @@ export class Menus {
                 <button type="button" class="ak-seg-btn ak-seg-sm ${this.createRoomMode === 'rumble' && this.createTeamSize === 3 ? 'active' : ''}" data-create-preset="rumble-3">
                   💥 Rumble 3v3
                 </button>
+                <button type="button" class="ak-seg-btn ak-seg-sm ${isCreateBeu ? 'active' : ''}" data-create-preset="beatemup">
+                  🥊 Beat 'em Up Co-op (2P)
+                </button>
               </div>
             </div>
 
@@ -1363,8 +1398,12 @@ export class Menus {
             </div>
 
             <div class="ak-field">
-              <label>Cenário / Plano de Fundo da Arena</label>
-              ${this.renderThemePillsHtml('data-create-theme', this.createMapTheme)}
+              <label>${isCreateBeu ? 'Fase do Beat em Up' : 'Cenário / Plano de Fundo da Arena'}</label>
+              ${
+                isCreateBeu
+                  ? this.renderBeuStagePillsHtml('data-create-beu-stage', this.selectedBeatEmUpStage)
+                  : this.renderThemePillsHtml('data-create-theme', this.createMapTheme)
+              }
             </div>
           </div>
 
@@ -1373,7 +1412,7 @@ export class Menus {
               Criar ${modeLabel} (Vagas Abertas)
             </button>
             <button id="btn-create-room-bot" class="ak-btn ak-btn-cyan" type="button">
-              Criar ${modeLabel} c/ Bots
+              Criar ${modeLabel} ${isCreateBeu ? 'c/ Bot Aliado' : 'c/ Bots'}
             </button>
           </div>
 
@@ -1416,6 +1455,7 @@ export class Menus {
     const mySlotKey = this.findActorSlot(room, slots);
     const mySlot = mySlotKey ? slots[mySlotKey] : null;
     const isRumble = room.roomMode === 'rumble';
+    const isBeatEmUp = room.roomMode === 'beatemup';
 
     const editingTarget = slots[this.lobbyEditingSlot];
     const editingSlotKey: FighterSlotId =
@@ -1481,58 +1521,164 @@ export class Menus {
     ];
 
     const hasAnyBot = activeIds.some((sid) => slots[sid].slotMode === 'bot');
+    const beuStage = getBeatEmUpStage(room.beatEmUpStage);
     const themeName =
       !room.mapTheme || room.mapTheme === 'random'
         ? 'Aleatório (por Seed)'
         : getArenaThemeInfo(room.mapTheme).name;
 
-    const roomMapToolbarHtml = `
-      <div class="ak-rumble-toolbar">
-        <div class="ak-rumble-map-meta">
-          <span class="ak-mini-badge amber">CENÁRIO: ${escapeHtml(themeName)}</span>
-          <span class="ak-profile-sub">Seed #${room.mapSeed ?? 1337}</span>
+    const roomMapToolbarHtml = isBeatEmUp
+      ? `
+        <div class="ak-rumble-toolbar">
+          <div class="ak-rumble-map-meta">
+            <span class="ak-mini-badge green">FASE: ${escapeHtml(beuStage.name)}</span>
+            <span class="ak-profile-sub">Chefão: ${escapeHtml(beuStage.bossName)}</span>
+          </div>
         </div>
-        <div class="ak-rumble-toolbar-btns">
-          ${
-            isRumble && mySlotKey
-              ? `<button id="btn-switch-team" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-                  ⇄ Trocar de Time
-                </button>`
-              : ''
-          }
-          ${
-            isHost
-              ? `<button id="btn-reroll-map" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-                  🎲 Sortear Mapa
-                </button>
-                ${
-                  isRumble
-                    ? `<button id="btn-fill-bots" class="ak-btn ak-btn-cyan ak-btn-sm" type="button">
-                        🤖 Preencher c/ Bots
-                      </button>
-                      <button id="btn-open-all-human" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
-                        👥 Abrir Vagas
-                      </button>`
-                    : ''
-                }`
-              : ''
-          }
+        ${
+          isHost
+            ? `<div style="margin-top:8px;">
+                ${this.renderBeuStagePillsHtml('data-room-beu-stage', beuStage.id)}
+              </div>`
+            : ''
+        }
+      `
+      : `
+        <div class="ak-rumble-toolbar">
+          <div class="ak-rumble-map-meta">
+            <span class="ak-mini-badge amber">CENÁRIO: ${escapeHtml(themeName)}</span>
+            <span class="ak-profile-sub">Seed #${room.mapSeed ?? 1337}</span>
+          </div>
+          <div class="ak-rumble-toolbar-btns">
+            ${
+              isRumble && mySlotKey
+                ? `<button id="btn-switch-team" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                    ⇄ Trocar de Time
+                  </button>`
+                : ''
+            }
+            ${
+              isHost
+                ? `<button id="btn-reroll-map" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                    🎲 Sortear Mapa
+                  </button>
+                  ${
+                    isRumble
+                      ? `<button id="btn-fill-bots" class="ak-btn ak-btn-cyan ak-btn-sm" type="button">
+                          🤖 Preencher c/ Bots
+                        </button>
+                        <button id="btn-open-all-human" class="ak-btn ak-btn-ghost ak-btn-sm" type="button">
+                          👥 Abrir Vagas
+                        </button>`
+                      : ''
+                  }`
+                : ''
+            }
+          </div>
         </div>
-      </div>
-      ${
-        isHost
-          ? `<div style="margin-top:8px;">
-              ${this.renderThemePillsHtml('data-room-theme', room.mapTheme || 'random')}
-            </div>`
-          : ''
-      }
-    `;
+        ${
+          isHost
+            ? `<div style="margin-top:8px;">
+                ${this.renderThemePillsHtml('data-room-theme', room.mapTheme || 'random')}
+              </div>`
+            : ''
+        }
+      `;
 
     let versusOrRumbleHtml = '';
     let canStart = false;
     let hostStatusHint = '';
 
-    if (!isRumble) {
+    if (isBeatEmUp) {
+      const p1Char = this.manifest.characters[room.p1.charId];
+      const p2Slot = slots.p2;
+      const p2Char = this.manifest.characters[p2Slot.charId];
+      const p1Thumb = p1Char?.phases.fase_1?.actions.idle[0]?.src ?? '';
+      const p2Thumb = p2Char?.phases.fase_1?.actions.idle[0]?.src ?? '';
+      const p2Occupied = p2Slot.slotMode === 'bot' || (p2Slot.slotMode === 'human' && Boolean(p2Slot.userId));
+      const p2WaitingReady = p2Slot.slotMode === 'human' && Boolean(p2Slot.userId) && !p2Slot.ready;
+      canStart = isHost && !p2WaitingReady;
+      hostStatusHint = p2WaitingReady
+        ? `Aguardando ${p2Slot.username} clicar em "Pronto!" para iniciar.`
+        : p2Slot.slotMode === 'human' && !p2Slot.userId
+          ? 'Você pode iniciar Solo agora ou aguardar um amigo entrar na vaga P2!'
+          : 'Equipe pronta! Inicie a campanha cooperativa.';
+
+      versusOrRumbleHtml = `
+        <div class="ak-lobby-versus">
+          <div class="ak-lobby-slot p1">
+            <div class="ak-slot-header">
+              <span class="ak-mini-badge cyan">P1 · LÍDER (HERÓI)</span>
+              <span class="ak-mini-badge green">PRONTO</span>
+            </div>
+            <div class="ak-slot-player">
+              <img class="ak-char-thumb" src="${p1Thumb}" alt="${escapeHtml(p1Char?.name ?? '')}" />
+              <div>
+                <div class="ak-slot-name">${escapeHtml(room.p1.username)}</div>
+                <div class="ak-profile-sub">
+                  ${escapeHtml(p1Char?.name ?? room.p1.charId)} · Fase ${room.p1.startPhase} · Nv ${room.p1.level}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="ak-vs-pill" style="background:rgba(34,197,94,0.2);border-color:#22c55e;color:#86efac;">CO-OP</div>
+
+          <div class="ak-lobby-slot p2">
+            <div class="ak-slot-header">
+              <span class="ak-mini-badge ${p2Slot.slotMode === 'bot' ? 'amber' : 'green'}">
+                ${p2Slot.slotMode === 'bot' ? 'P2 · BOT ALIADO' : p2Slot.slotMode === 'closed' ? 'P2 · SOLO' : 'P2 · PARCEIRO'}
+              </span>
+              ${
+                p2Slot.slotMode === 'closed'
+                  ? '<span class="ak-mini-badge">FECHADA</span>'
+                  : p2Slot.slotMode === 'bot'
+                    ? '<span class="ak-mini-badge green">PRONTO</span>'
+                    : p2Slot.userId
+                      ? `<span class="ak-mini-badge ${p2Slot.ready ? 'green' : 'amber'}">${p2Slot.ready ? 'PRONTO!' : 'ESCOLHENDO'}</span>`
+                      : '<span class="ak-mini-badge">VAGA ABERTA</span>'
+              }
+            </div>
+
+            ${
+              p2Occupied
+                ? `<div class="ak-slot-player">
+                    <img class="ak-char-thumb" src="${p2Thumb}" alt="${escapeHtml(p2Char?.name ?? '')}" />
+                    <div>
+                      <div class="ak-slot-name">${escapeHtml(p2Slot.username)}</div>
+                      <div class="ak-profile-sub">
+                        ${escapeHtml(p2Char?.name ?? p2Slot.charId)} · Fase ${p2Slot.startPhase}
+                      </div>
+                    </div>
+                  </div>`
+                : `<div class="ak-waiting-slot">
+                    ${
+                      p2Slot.slotMode === 'closed'
+                        ? 'Modo Solo ativo na sala (vaga P2 fechada).'
+                        : `Aguardando 2º jogador ou inicie Solo...<br/><span style="font-size:0.75rem;color:var(--ak-muted);">Código <strong>#${escapeHtml(room.code)}</strong></span>`
+                    }
+                  </div>`
+            }
+
+            ${
+              isHost
+                ? `<div class="ak-seg-group" style="margin-top:8px;">
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${p2Slot.slotMode === 'human' ? 'active' : ''}" data-slot-config="p2:human">
+                      👤 Amigo
+                    </button>
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${p2Slot.slotMode === 'bot' ? 'active' : ''}" data-slot-config="p2:bot">
+                      🤖 Bot Aliado
+                    </button>
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${p2Slot.slotMode === 'closed' ? 'active' : ''}" data-slot-config="p2:closed">
+                      🚫 Solo
+                    </button>
+                  </div>`
+                : ''
+            }
+          </div>
+        </div>
+      `;
+    } else if (!isRumble) {
       const p1Char = this.manifest.characters[room.p1.charId];
       const p2Char = this.manifest.characters[room.p2.charId];
       const p1Thumb = p1Char?.phases.fase_1?.actions.idle[0]?.src ?? '';
@@ -1717,8 +1863,8 @@ export class Menus {
             </button>
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
               <h2 style="margin:0;">Sala #${escapeHtml(room.code)}</h2>
-              <span class="ak-mini-badge ${isRumble ? 'amber' : 'cyan'}">
-                ${isRumble ? `RUMBLE ${room.teamSize ?? 3}v${room.teamSize ?? 3}` : '1v1'}
+              <span class="ak-mini-badge ${isBeatEmUp ? 'green' : isRumble ? 'amber' : 'cyan'}">
+                ${isBeatEmUp ? "BEAT 'EM UP CO-OP" : isRumble ? `RUMBLE ${room.teamSize ?? 3}v${room.teamSize ?? 3}` : '1v1'}
               </span>
               <span class="ak-mini-badge ${room.isPublic ? 'green' : ''}">
                 ${room.isPublic ? '🌐 PÚBLICA' : '🔒 PRIVADA'}
@@ -1736,7 +1882,7 @@ export class Menus {
             isHost
               ? `<div class="ak-lobby-host-config">
                   <div class="ak-seg-group">
-                    <button type="button" class="ak-seg-btn ak-seg-sm ${!isRumble ? 'active' : ''}" data-room-preset="1v1">
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${!isRumble && !isBeatEmUp ? 'active' : ''}" data-room-preset="1v1">
                       1v1
                     </button>
                     <button type="button" class="ak-seg-btn ak-seg-sm ${isRumble && room.teamSize === 2 ? 'active' : ''}" data-room-preset="rumble-2">
@@ -1744,6 +1890,9 @@ export class Menus {
                     </button>
                     <button type="button" class="ak-seg-btn ak-seg-sm ${isRumble && (room.teamSize ?? 3) === 3 ? 'active' : ''}" data-room-preset="rumble-3">
                       Rumble 3v3
+                    </button>
+                    <button type="button" class="ak-seg-btn ak-seg-sm ${isBeatEmUp ? 'active' : ''}" data-room-preset="beatemup">
+                      Beat 'em Up (2P)
                     </button>
                   </div>
                   <div class="ak-seg-group">
@@ -1796,9 +1945,9 @@ export class Menus {
               <div class="ak-seg-group">${phaseButtons}</div>
             </div>
             ${
-              isHost && hasAnyBot
+              isHost && (hasAnyBot || isBeatEmUp)
                 ? `<div class="ak-field">
-                    <label>Dificuldade dos Bots</label>
+                    <label>${isBeatEmUp ? 'Dificuldade da Fase' : 'Dificuldade dos Bots'}</label>
                     <div class="ak-seg-group">
                       ${diffButtons
                         .map(
@@ -1821,7 +1970,7 @@ export class Menus {
                     ${escapeHtml(hostStatusHint)}
                   </div>
                   <button id="btn-lobby-start" class="ak-btn ak-btn-primary" type="button" ${canStart ? '' : 'disabled style="opacity:0.45;cursor:not-allowed;"'}>
-                    ${isRumble ? 'Iniciar Rumble Arena!' : 'Iniciar Batalha!'}
+                    ${isBeatEmUp ? 'Iniciar Beat em Up!' : isRumble ? 'Iniciar Rumble Arena!' : 'Iniciar Batalha!'}
                   </button>`
                 : mySlot
                   ? `<div style="font-size:0.8rem;color:var(--ak-muted);">
@@ -2213,13 +2362,14 @@ export class Menus {
     const titleColor = report.won ? 'var(--ak-accent)' : 'var(--ak-primary)';
     const leveledUp = xpSummary.newLevel > xpSummary.oldLevel;
     const unlockedNewPhase = xpSummary.newPhase > xpSummary.oldPhase;
+    const inRoom = this.activeMatchMode !== 'solo' || Boolean(this.net.getCurrentRoom());
 
     return `
       <div class="ak-modal-backdrop">
         <div class="ak-modal" style="text-align:center;">
           <h2 style="margin:0;font-size:1.9rem;color:${titleColor};">${title}</h2>
           <p style="margin:0;color:var(--ak-muted);">
-            ${escapeHtml(charName)} (Fase ${report.finalPhase}) em <strong>${escapeHtml(report.stageName)}</strong>
+            ${escapeHtml(charName)} (Fase ${report.finalPhase}) em <strong>${escapeHtml(report.stageName)}</strong>${report.isCoop ? ' · <strong>Co-op</strong>' : ''}
           </p>
           <div class="ak-panel" style="padding:12px;display:grid;gap:6px;">
             <div style="font-weight:800;color:#facc15;">Pontuação: ${report.score} PTS</div>
@@ -2235,11 +2385,22 @@ export class Menus {
                 : ''
             }
           </div>
-          <button id="btn-beu-rematch" class="ak-btn ak-btn-primary" type="button">
-            Jogar Novamente
-          </button>
+          ${
+            inRoom
+              ? `<button id="btn-beu-lobby" class="ak-btn ak-btn-primary" type="button">
+                  Voltar ao Lobby da Sala
+                </button>`
+              : ''
+          }
+          ${
+            report.mode !== 'online'
+              ? `<button id="btn-beu-rematch" class="ak-btn ${inRoom ? 'ak-btn-cyan' : 'ak-btn-primary'}" type="button">
+                  Jogar Novamente
+                </button>`
+              : ''
+          }
           <button id="btn-beu-select" class="ak-btn ak-btn-ghost" type="button">
-            Escolher Fase / Herói
+            ${inRoom ? 'Sair da Sala' : 'Escolher Fase / Herói'}
           </button>
         </div>
       </div>
@@ -2786,6 +2947,10 @@ export class Menus {
         void this.callbacks.onStartBeatEmUp(this.getCurrentBeatEmUpConfig());
       }, 'Entrar nas Ruas! (Tela Cheia)');
     });
+    click('btn-go-beu-coop', () => {
+      this.createRoomMode = 'beatemup';
+      this.showRooms();
+    });
     this.uiLayer.querySelectorAll<HTMLElement>('[data-pick-beu-char]').forEach((el) => {
       el.addEventListener('click', () => {
         this.audio.unlock();
@@ -2859,12 +3024,19 @@ export class Menus {
       }
       this.callbacks.onQuitToSelect();
     });
+    click('btn-beu-lobby', () => {
+      this.lastBeatEmUpResult = null;
+      this.callbacks.onReturnToLobby();
+    });
     click('btn-beu-rematch', () => {
       this.lastBeatEmUpResult = null;
       this.callbacks.onRestartMatch();
     });
     click('btn-beu-select', () => {
       this.lastBeatEmUpResult = null;
+      if (this.activeMatchMode !== 'solo' || this.net.getCurrentRoom()) {
+        this.net.leaveRoom();
+      }
       this.callbacks.onQuitToSelect();
     });
 
@@ -2876,6 +3048,8 @@ export class Menus {
         const preset = el.dataset.createPreset;
         if (preset === '1v1') {
           this.createRoomMode = '1v1';
+        } else if (preset === 'beatemup') {
+          this.createRoomMode = 'beatemup';
         } else if (preset === 'rumble-2') {
           this.createRoomMode = 'rumble';
           this.createTeamSize = 2;
@@ -2905,6 +3079,18 @@ export class Menus {
       });
     });
 
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-create-beu-stage]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        const sid = el.dataset.createBeuStage as BeatEmUpStageId | undefined;
+        if (sid) {
+          this.selectedBeatEmUpStage = sid;
+          this.render();
+        }
+      });
+    });
+
     click('btn-create-room-human', () => {
       const prog = this.save.getCharacterProgress(this.selectedP1);
       this.roomErrorMsg = null;
@@ -2914,6 +3100,7 @@ export class Menus {
         p2Mode: 'human',
         isPublic: this.createRoomPublic,
         mapTheme: this.createMapTheme,
+        beatEmUpStage: this.selectedBeatEmUpStage,
         fillBots: false,
         charId: this.selectedP1,
         startPhase: Math.min(this.selectedStartPhase, prog.unlockedPhase),
@@ -2929,6 +3116,7 @@ export class Menus {
         p2Mode: 'bot',
         isPublic: this.createRoomPublic,
         mapTheme: this.createMapTheme,
+        beatEmUpStage: this.selectedBeatEmUpStage,
         fillBots: this.createRoomMode === 'rumble',
         botDifficulty: this.save.getData().settings.difficulty,
         charId: this.selectedP1,
@@ -3014,10 +3202,23 @@ export class Menus {
         const preset = el.dataset.roomPreset;
         if (preset === '1v1') {
           this.net.updateRoomConfig({ roomMode: '1v1', teamSize: 1 });
+        } else if (preset === 'beatemup') {
+          this.net.updateRoomConfig({ roomMode: 'beatemup', teamSize: 1 });
         } else if (preset === 'rumble-2') {
           this.net.updateRoomConfig({ roomMode: 'rumble', teamSize: 2 });
         } else {
           this.net.updateRoomConfig({ roomMode: 'rumble', teamSize: 3 });
+        }
+      });
+    });
+
+    this.uiLayer.querySelectorAll<HTMLElement>('[data-room-beu-stage]').forEach((el) => {
+      el.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.playSfx('ui');
+        const sid = el.dataset.roomBeuStage as BeatEmUpStageId | undefined;
+        if (sid) {
+          this.net.updateRoomConfig({ beatEmUpStage: sid });
         }
       });
     });
